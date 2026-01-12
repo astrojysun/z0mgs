@@ -1,13 +1,17 @@
 import os, glob
 from utils_spherex import *
 
+gal_list = ['m31']
+#gal_list = ['m33']
+#gal_list = ['ic10', 'ic1613', 'ngc6822']
+#gal_list = ['DDO221'] # this is WLM
+
 #gal_list = ['ngc0253','ngc0300','ngc4594','ngc5194','ngc5236','ngc7793','m33']
 #gal_list = ['ngc3034']
-#gal_list = ['m33']
-gal_list = ['ngc5194']
+#gal_list = ['ngc5194']
 
-re_download = False
-make_sed = False
+re_download = True
+make_sed = True
 grid_cube = True
 
 for this_gal in gal_list:
@@ -24,7 +28,7 @@ for this_gal in gal_list:
         image_tab = \
             search_spherex_images(
                 target = this_gal,
-                radius = 30*u.arcmin,
+                radius = 60*u.arcmin,
                 collection = 'spherex_qr2',
                 verbose = True)
 

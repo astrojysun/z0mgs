@@ -4,7 +4,8 @@ from utils_spherex import *
 #gal_list = ['ngc0253','ngc0300','ngc4594','ngc5194','ngc5236','ngc7793','m33']
 #gal_list = ['ngc3034']
 #gal_list = ['m33']
-gal_list = ['ngc5194','m33','ngc0253']
+#gal_list = ['ngc5194','m33','ngc0253']
+gal_list = ['m31']
 
 re_download = False
 make_line = True
@@ -46,7 +47,7 @@ for this_gal in gal_list:
         target_hdu = make_cube_header(
             center_coord = this_gal,
             pix_scale = 6. / 3600.,
-            extent = 30. / 60., 
+            extent = 180. / 60., 
             lam_min = 0.75, lam_max = 5.2, lam_step = 0.0075,
             return_header=False)
 

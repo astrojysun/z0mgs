@@ -889,7 +889,7 @@ def spherex_line_image(
     """
 
     sol_kms = 2.99792E5
-    sol_cgs = 2.99792468E8
+    sol_cgs = 2.99792468E10
     
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Initialize the output
