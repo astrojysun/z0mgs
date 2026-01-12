@@ -326,7 +326,7 @@ def make_cube_header(
         nx = None, ny = None,
         lam_min = 0.7, lam_max = 5.2, lam_step = 0.02,
         return_header=False):
-    """Make a #D FITS header centered on the coordinate of interest with a
+    """Make a 2D FITS header centered on the coordinate of interest with a
     user-specififed pixel scale and extent and wavelength axis.
 
     
@@ -703,12 +703,8 @@ def grid_spherex_cube(
         sub_zodi = True,
         outfile = None,
         overwrite=True):
-    """TBD #1: handle the wavelengths better. They're offset right now and
-    don't pay attention to the bandwidth.
-
-    TBD #2: Make a not-a-cube spectrum at each location holding the
-    SED and wavelength.
-
+    """
+    Grid images into a Spherex cube.
     """
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -735,6 +731,9 @@ def grid_spherex_cube(
     
     sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
     weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+
+    bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    bw_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
     
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over the image list
@@ -772,7 +771,10 @@ def grid_spherex_cube(
         masked_data[mask] = np.nan
         hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
         
-        # This is pretty annoyingly inefficient to repeat
+        # This is pretty annoyingly inefficient to repeat three
+        # reprojects, but for now it is what it is. Reproject image,
+        # wavelength, and bandwidth to the target header
+        
         missing = np.nan
         
         reprojected_image, footprint_image = \
@@ -787,6 +789,8 @@ def grid_spherex_cube(
             reproject_interp(hdu_bw, target_header_2d, order='bilinear')
         reprojected_bw[footprint_bw == 0] = missing        
 
+        # Now loop over the wavelength range we consider
+        
         min_lam = np.nanmin(reprojected_lam - reprojected_bw - lam_step)
         max_lam = np.nanmax(reprojected_lam + reprojected_bw + lam_step)
 
@@ -803,13 +807,16 @@ def grid_spherex_cube(
             if this_lam > max_lam:
                 continue            
 
-            # Compare each pixel to the center of the current model
+            # Compare each pixel to the center of the current channel
             
             delta = np.abs(this_lam - reprojected_lam)
-            weight = delta / lam_step
+            weight = delta*0.0 + 1.0
+            
+            # Keep the pixels where that difference is less than half
+            # the bandwidth
             
             y_ind, x_ind = \
-                np.where(delta <= (lam_step))
+                np.where(delta <= (reprojected_bw*0.5))
 
             pix_in_cube += len(y_ind)
             
@@ -821,6 +828,13 @@ def grid_spherex_cube(
 
             weight_cube[z_ind, y_ind, x_ind] = \
                 weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+
+            bw_sum_cube[z_ind, y_ind, x_ind] = \
+                bw_sum_cube[z_ind, y_ind, x_ind] + \
+                (reprojected_bw[y_ind, x_ind]*weight[y_ind, x_ind])
+
+            bw_weight_cube[z_ind, y_ind, x_ind] = \
+                bw_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
             
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Output and return
@@ -829,8 +843,157 @@ def grid_spherex_cube(
     cube = sum_cube / weight_cube
     cube[np.where(weight_cube == 0.0)] = np.nan
     
-    new_hdu = fits.PrimaryHDU(cube, target_header)
+    cube_hdu = fits.PrimaryHDU(cube, target_header)
     if outfile is not None:
-        new_hdu.writeto(outfile, overwrite=overwrite)
+        cube_hdu.writeto(outfile, overwrite=overwrite)
+
+    weight_hdu = fits.PrimaryHDU(weight_cube, target_header)
+    if outfile is not None:
+        cube_hdu.writeto(outfile.replace('.fits','_weight.fits')
+                         , overwrite=overwrite)
     
-    return(new_hdu)
+        
+    bw_cube = bw_sum_cube / bw_weight_cube
+    bw_cube[np.where(bw_weight_cube == 0.0)] = np.nan
+
+    bw_header = target_header.copy()
+    bw_header['BUNIT'] = 'MICRONS'
+    
+    bw_hdu = fits.PrimaryHDU(bw_cube, bw_header)
+    if outfile is not None:
+        bw_hdu.writeto(outfile.replace('.fits','_bw.fits')
+                       , overwrite=overwrite)
+
+    bw_weight_hdu = fits.PrimaryHDU(bw_weight_cube, bw_header)
+    if outfile is not None:
+        bw_hdu.writeto(outfile.replace('.fits','_bwweight.fits')
+                       , overwrite=overwrite)
+    
+    return(cube_hdu)
+
+def spherex_line_image(
+        target_hdu = None,
+        central_lam = 1.87,
+        vel_width = 500.,
+        frac_thresh = 0.75,
+        image_list = [],
+        sub_zodi = True,
+        continuum = None,
+        outfile = None,
+        overwrite = True):
+    """
+    Grid images into a Spherex line-integrated image.
+    """
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Initialize the output
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    target_header = target_hdu.header
+    nx = target_header['NAXIS1']
+    ny = target_header['NAXIS2']
+
+    target_header_2d = target_header.copy()
+    target_header_2d['NAXIS'] = 2
+    del target_header_2d['NAXIS3']
+    del target_header_2d['CRVAL3']
+    del target_header_2d['CDELT3']
+    del target_header_2d['CRPIX3']
+    del target_header_2d['CTYPE3']
+    del target_header_2d['CUNIT3']
+       
+    sum_image = np.zeros((ny,nx),dtype=np.float32)
+    weight_image = np.zeros((ny,nx),dtype=np.float32)
+
+    if continuum is not None:
+        cont_hdu_list = fits.open(continuum)
+        cont_hdu = cont_hdu_list[0]
+
+        missing = np.nan
+        reprojected_cont, footprint_cont = \
+            reproject_interp(cont_hdu, target_header_2d, order='bilinear')
+        reprojected_cont[footprint_cont == 0] = missing
+
+    sol_kms = 2.99792E5
+    min_lam = central_lam - vel_width/sol_kms*central_lam
+    max_lam = central_lam + vel_width/sol_kms*central_lam
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Loop over the image list
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    for this_fname in ProgressBar(image_list):        
+        
+        this_hdu_list = fits.open(this_fname)
+        hdu_image = this_hdu_list['IMAGE']
+        hdu_flags = this_hdu_list['FLAGS']
+        hdu_zodi = this_hdu_list['ZODI']        
+        image_header = hdu_image.header
+        
+        lam, bw = make_wavelength_image(
+            hdu_list = this_hdu_list,
+            use_hdu = 'IMAGE',
+        )
+
+        this_max_lam = np.nanmax(lam + bw)
+        this_min_lam = np.nanmin(lam - bw)
+
+        if (this_max_lam < min_lam):
+            continue
+
+        if (this_min_lam > max_lam):
+            continue
+        
+        hdu_lam = fits.PrimaryHDU(lam, image_header)
+        hdu_bw = fits.PrimaryHDU(bw, image_header)
+
+        # Implement flags and subtract ZODI if requested
+
+        mask = make_mask_from_flags(
+            hdu_flags.data,
+            flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                        'HOT','COLD','NONLINEAR','PERSIST']
+        )
+
+        if sub_zodi:
+            masked_data = hdu_image.data - hdu_zodi.data
+        else:
+            masked_data = hdu_image.data
+            
+        masked_data[mask] = np.nan
+        hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
+        
+        # This is pretty annoyingly inefficient to repeat three
+        # reprojects, but for now it is what it is. Reproject image,
+        # wavelength, and bandwidth to the target header.
+        
+        missing = np.nan
+        
+        reprojected_image, footprint_image = \
+            reproject_interp(hdu_masked_image, target_header_2d, order='bilinear')
+        reprojected_image[footprint_image == 0] = missing
+
+        reprojected_lam, footprint_lam = \
+            reproject_interp(hdu_lam, target_header_2d, order='bilinear')
+        reprojected_lam[footprint_lam == 0] = missing
+
+        reprojected_bw, footprint_bw = \
+            reproject_interp(hdu_bw, target_header_2d, order='bilinear')
+        reprojected_bw[footprint_bw == 0] = missing        
+
+        # Identify overlap
+
+        if continuum is not None:
+            
+            reprojected_image = reprojected_image - continuum
+
+        # Identify relevant pixels
+
+        # TBD
+
+        # Convert to line integral
+
+        # TBD
+
+        
+    
