@@ -880,6 +880,8 @@ def spherex_line_image(
         sub_zodi = True,
         continuum = None,
         operation = 'integrate',
+        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                        'HOT','COLD','NONLINEAR','PERSIST'],
         outfile = None,
         overwrite = True):
     """
@@ -959,8 +961,7 @@ def spherex_line_image(
 
         mask = make_mask_from_flags(
             hdu_flags.data,
-            flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST']
+            flags_to_use = flags_to_use,
         )
 
         if sub_zodi:

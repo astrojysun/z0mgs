@@ -4,7 +4,7 @@ from utils_spherex import *
 #gal_list = ['ngc0253','ngc0300','ngc4594','ngc5194','ngc5236','ngc7793','m33']
 #gal_list = ['ngc3034']
 #gal_list = ['m33']
-gal_list = ['ngc5194']
+gal_list = ['ngc5194','m33','ngc0253']
 
 re_download = False
 make_line = True
@@ -35,6 +35,13 @@ for this_gal in gal_list:
                 verbose = True)
     
     if make_line:
+
+        flags_to_use = \
+            ['SUR_ERROR','NONFUNC','MISSING_DATA',
+             'HOT','COLD','NONLINEAR','PERSIST']
+
+        flags_to_use = \
+            ['NONFUNC','MISSING_DATA']
     
         target_hdu = make_cube_header(
             center_coord = this_gal,
@@ -54,6 +61,7 @@ for this_gal in gal_list:
             frac_thresh = 0.10,
             image_list = im_list,
             operation = 'intensity',
+            flags_to_use = flags_to_use,
             overwrite = True)
 
         print("Making an off-line image at higher wavelength")
@@ -65,6 +73,7 @@ for this_gal in gal_list:
             frac_thresh = 0.10,
             image_list = im_list,
             operation = 'intensity',
+            flags_to_use = flags_to_use,
             overwrite = True)
 
         off_image = 0.5*(off_low_hdu.data + off_high_hdu.data)
@@ -83,4 +92,5 @@ for this_gal in gal_list:
             continuum = gal_dir + this_gal + '_bra_off.fits',
             outfile = gal_dir + this_gal+'_bra.fits',
             operation = 'integrate',
+            flags_to_use = flags_to_use,
             overwrite = True)
