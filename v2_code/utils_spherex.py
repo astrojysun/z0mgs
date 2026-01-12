@@ -943,9 +943,9 @@ def spherex_line_image(
             use_hdu = 'IMAGE',
         )
 
-        this_max_lam = np.nanmax(lam + bw)
-        this_min_lam = np.nanmin(lam - bw)
-
+        this_max_lam = (np.nanmax(lam + bw)).value
+        this_min_lam = (np.nanmin(lam - bw)).value
+        
         if (this_max_lam < min_lam):
             continue
 
@@ -989,6 +989,8 @@ def spherex_line_image(
             reproject_interp(hdu_bw, target_header_2d, order='bilinear')
         reprojected_bw[footprint_bw == 0] = missing        
 
+        weight = np.isfinite(reprojected_image)*1.0
+        
         # Identify overlap
 
         if continuum is not None:
@@ -1039,6 +1041,8 @@ def spherex_line_image(
                 reprojected_image * 1E6 * \
                 1E-23 * bw_freq
 
+            target_header_2d['BUNIT'] = 'erg/s/cm**2/sr'
+            
         if operation.lower() == 'average':
 
             # Stay in MJy/sr
@@ -1059,11 +1063,11 @@ def spherex_line_image(
     image = sum_image / weight_image
     image[np.where(weight_image == 0.0)] = np.nan
 
-    image_hdu = fits.PrimaryHDU(image, target_header)
+    image_hdu = fits.PrimaryHDU(image, target_header_2d)
     if outfile is not None:
         image_hdu.writeto(outfile, overwrite=overwrite)
-
-    weight_hdu = fits.PrimaryHDU(weight_image, target_header)
+        
+    weight_hdu = fits.PrimaryHDU(weight_image, target_header_2d)
     if outfile is not None:
         weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
                            , overwrite=overwrite)
