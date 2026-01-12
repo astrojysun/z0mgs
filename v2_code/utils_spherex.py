@@ -879,12 +879,16 @@ def spherex_line_image(
         image_list = [],
         sub_zodi = True,
         continuum = None,
+        operation = 'integrate',
         outfile = None,
         overwrite = True):
     """
     Grid images into a Spherex line-integrated image.
     """
 
+    sol_kms = 2.99792E5
+    sol_cgs = 2.99792468E8
+    
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Initialize the output
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -913,11 +917,15 @@ def spherex_line_image(
         reprojected_cont, footprint_cont = \
             reproject_interp(cont_hdu, target_header_2d, order='bilinear')
         reprojected_cont[footprint_cont == 0] = missing
+    
+    min_lam = central_lam - vel_width/sol_kms*central_lam*0.5
+    max_lam = central_lam + vel_width/sol_kms*central_lam*0.5
 
-    sol_kms = 2.99792E5
-    min_lam = central_lam - vel_width/sol_kms*central_lam
-    max_lam = central_lam + vel_width/sol_kms*central_lam
+    # Initialize
 
+    sum_image = np.zeros((ny,nx),dtype=np.float32)
+    weight_image = np.zeros((ny,nx),dtype=np.float32)
+    
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over the image list
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -985,15 +993,80 @@ def spherex_line_image(
 
         if continuum is not None:
             
-            reprojected_image = reprojected_image - continuum
+            reprojected_image = reprojected_image - reprojected_cont
 
         # Identify relevant pixels
 
-        # TBD
+        # ... lower and upper end of the bandpass for each pixel
+        low_lam = reprojected_lam - 0.5*reprojected_bw                
+        hi_lam = reprojected_lam + 0.5*reprojected_bw
 
+        # ... identify where overlap with the line starts
+        # pixel-by-pixel
+        
+        start_im = low_lam
+        start_im[np.where(min_lam > start_im)] = min_lam
+
+        # ... identify where overlap with the line stars
+        # pixel-by-pixel
+        
+        stop_im = hi_lam
+        stop_im[np.where(max_lam < stop_im)] = max_lam
+
+        # ... fraction of overlap with the full line
+        
+        overlap_im = (stop_im-start_im)/(max_lam - min_lam)
+
+        # ... find where the filter overlaps the line above the
+        # threshold
+        
+        y_ind, x_ind = \
+            np.where(overlap_im >= frac_thresh)
+        
         # Convert to line integral
 
-        # TBD
+        if operation.lower() == 'integrate':
 
+            hi_freq = sol_cgs/(low_lam*1E-4)
+            low_freq = sol_cgs/(hi_lam*1E-4)
+
+            bw_freq = hi_freq-low_freq
+
+            # Starts in MJy/sr then convert to cgs (so erg/s/cm2/Hz)
+            # then multiply by bandwidth in Hz
+            
+            reprojected_image = \
+                reprojected_image * 1E6 * \
+                1E-23 * bw_freq
+
+        if operation.lower() == 'average':
+
+            # Stay in MJy/sr
+            pass
         
+        sum_image[y_ind, x_ind] = \
+            sum_image[y_ind, x_ind] + \
+            (reprojected_image[y_ind, x_ind]*weight[y_ind, x_ind])
+
+        weight_image[y_ind, x_ind] = \
+            weight_image[y_ind, x_ind] + \
+            (weight[y_ind, x_ind])        
+        
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Output and return
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    image = sum_image / weight_image
+    image[np.where(weight_image == 0.0)] = np.nan
+
+    image_hdu = fits.PrimaryHDU(image, target_header)
+    if outfile is not None:
+        image_hdu.writeto(outfile, overwrite=overwrite)
+
+    weight_hdu = fits.PrimaryHDU(weight_image, target_header)
+    if outfile is not None:
+        weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
+                           , overwrite=overwrite)
+        
+    return(image_hdu)
     
