@@ -11,6 +11,7 @@ import urllib.error
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
+from astropy.wcs.utils import pixel_to_skycoord
 from astropy.nddata import Cutout2D
 from astropy.table import Table, QTable
 from astropy import units as u
@@ -25,6 +26,9 @@ from reproject import reproject_interp
 from reproject.mosaicking import find_optimal_celestial_wcs
 
 from astropy.utils.console import ProgressBar
+
+from utils_z0mgs_images import deproject
+
 
 #import warnings
 #warnings.filterwarnings('ignore', category=UserWarning)
@@ -543,7 +547,14 @@ def extract_spherex_sed(
         image_list = [],
         outfile = None,
         overwrite=True):
-    """
+    """Extract the SED at a target position (target_coord) from a list of
+    images. Write it to an output file (as a text table).
+
+    There is no gridding here, the SED will just record the wavelength
+    and bandwidth from each image in the list at that location. Useful
+    to directly see the data. The table also includes the image file
+    name.
+
     """
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -634,7 +645,13 @@ def make_mask_from_flags(
         flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
                         'HOT','COLD','NONLINEAR','PERSIST'],        
 ):
-    """
+    """Given a list of flag names to use construct a mask from the input
+    flag image. The flag image is a bitmask, and the mapping between
+    flags and bits is defined in the explanatory supplement and coded
+    into a dictionary above.
+
+    THIS COULD ALL USE CHECKING!!!
+
     """
 
     # From the explanatory supplement
@@ -701,10 +718,26 @@ def grid_spherex_cube(
         target_hdu = None,
         image_list = [],
         sub_zodi = True,
+        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                        'HOT','COLD','NONLINEAR','PERSIST'],
+        sub_bkgrd = True,
+        gal_coord = None,
+        gal_rad_deg = 10.0/60.0,
+        gal_incl = 0.,
+        gal_pa = 0.,
         outfile = None,
         overwrite=True):
-    """
-    Grid images into a Spherex cube.
+    """Grid all images from an image_list into a cube and optionally
+    writes the cube to an output file along with a set of supporting
+    files.
+
+    Optionally subtracts the zodiacal light model provided with the
+    SPHEREx data.
+
+    Lets the user specify which of the provided flags to apply.
+
+    Can toggle background fitting on and off.
+
     """
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -734,6 +767,9 @@ def grid_spherex_cube(
 
     bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
     bw_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+
+    bkgrd_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    bkgrd_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
     
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over the image list
@@ -759,8 +795,7 @@ def grid_spherex_cube(
 
         mask = make_mask_from_flags(
             hdu_flags.data,
-            flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST']
+            flags_to_use = flags_to_use,
         )
 
         if sub_zodi:
@@ -770,7 +805,56 @@ def grid_spherex_cube(
             
         masked_data[mask] = np.nan
         hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
-        
+
+        # Fit a background (or leave it at 0.0)
+        bkgrd = np.zeros_like(masked_data)        
+        if sub_bkgrd:
+
+            # ................................
+            # Mask out the galaxy
+            # ................................            
+
+            # Set the center to the image center if not supplied
+            if gal_coord is None:
+                ny, nx = hdu_image.shape
+                wcs = WCS(hdu_image.header)
+                gal_coord = pixel_to_skycoord(nx / 2, ny / 2, wcs, origin=0)
+
+            # Calculate the galaxy footprint
+            radius_deg, projang_deg = \
+                deproject(
+                    center_coord=gal_coord, incl=gal_incl, pa=gal_pa,
+                    template_header = hdu_image.header,
+                    return_offset = False)
+
+            # Create a copy with the galaxy masked
+            temp_data = masked_data.copy()
+            gal_ind = np.where(radius_deg < gal_rad_deg)
+            temp_data[gal_ind] = np.nan
+
+            # ................................            
+            # Fit a median at each wavelength
+            # ................................
+            
+            med_bw = np.nanmedian(bw.to(u.um)).value
+            min_lam = np.nanmin(lam).value
+            max_lam = np.nanmax(lam).value
+            
+            lams_for_bkgrd = np.arange(min_lam-med_bw,
+                                       max_lam+med_bw, med_bw)
+
+            for this_lam in lams_for_bkgrd:
+
+                this_ind = np.where(np.abs(lam.value - this_lam) <= 0.5*med_bw)
+                if len(this_ind) == 0:
+                    continue
+                this_bkgrd_val = np.nanmedian(temp_data[this_ind])
+                bkgrd[this_ind] = this_bkgrd_val
+                
+        masked_data -= bkgrd
+        hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
+        hdu_bkgrd_image = fits.PrimaryHDU(bkgrd, image_header)
+
         # This is pretty annoyingly inefficient to repeat three
         # reprojects, but for now it is what it is. Reproject image,
         # wavelength, and bandwidth to the target header
@@ -788,6 +872,10 @@ def grid_spherex_cube(
         reprojected_bw, footprint_bw = \
             reproject_interp(hdu_bw, target_header_2d, order='bilinear')
         reprojected_bw[footprint_bw == 0] = missing        
+
+        reprojected_bkgrd, footprint_bkgrd = \
+            reproject_interp(hdu_bkgrd_image, target_header_2d, order='bilinear')
+        reprojected_bkgrd[footprint_bkgrd == 0] = missing        
 
         # Now loop over the wavelength range we consider
         
@@ -835,6 +923,13 @@ def grid_spherex_cube(
 
             bw_weight_cube[z_ind, y_ind, x_ind] = \
                 bw_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+
+            bkgrd_sum_cube[z_ind, y_ind, x_ind] = \
+                bkgrd_sum_cube[z_ind, y_ind, x_ind] + \
+                (reprojected_bkgrd[y_ind, x_ind]*weight[y_ind, x_ind])
+
+            bkgrd_weight_cube[z_ind, y_ind, x_ind] = \
+                bkgrd_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
             
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Output and return
@@ -851,7 +946,6 @@ def grid_spherex_cube(
     if outfile is not None:
         cube_hdu.writeto(outfile.replace('.fits','_weight.fits')
                          , overwrite=overwrite)
-    
         
     bw_cube = bw_sum_cube / bw_weight_cube
     bw_cube[np.where(bw_weight_cube == 0.0)] = np.nan
@@ -867,6 +961,22 @@ def grid_spherex_cube(
     bw_weight_hdu = fits.PrimaryHDU(bw_weight_cube, bw_header)
     if outfile is not None:
         bw_hdu.writeto(outfile.replace('.fits','_bwweight.fits')
+                       , overwrite=overwrite)
+        
+    bkgrd_cube = bkgrd_sum_cube / bkgrd_weight_cube
+    bkgrd_cube[np.where(bkgrd_weight_cube == 0.0)] = np.nan
+
+    bkgrd_header = target_header.copy()
+    bkgrd_header['BUNIT'] = 'MICRONS'
+    
+    bkgrd_hdu = fits.PrimaryHDU(bkgrd_cube, bkgrd_header)
+    if outfile is not None:
+        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrd.fits')
+                       , overwrite=overwrite)
+
+    bkgrd_weight_hdu = fits.PrimaryHDU(bkgrd_weight_cube, bkgrd_header)
+    if outfile is not None:
+        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrdweight.fits')
                        , overwrite=overwrite)
     
     return(cube_hdu)
