@@ -4,24 +4,15 @@ import os, glob
 from utils_spherex import *
 import astropy.units as u
 
-#gal_list = ['m31']
-#gal_list = ['m33']
-#gal_list = ['ic10', 'ic1613', 'ngc6822']
-#gal_list = ['DDO221'] # this is WLM
-
-#gal_list = ['ngc0253','ngc0300','ngc4594','ngc5194','ngc5236','ngc7793','m33']
-#gal_list = ['ngc3034']
-gal_list = ['ngc5194']
-#gal_list = ['ngc4303']
-
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Define targets
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
-# For now use a dictionary of galaxy name-size
+# For now use a dictionary of galaxy name and image size. We will
+# expand this eventually.
 
 gal_list = {
-    'ngc5194',20.*u.arcmin,
+    'ngc5194':20.*u.arcmin,
 }
 
 # Define the flags to use
@@ -34,11 +25,11 @@ flags_to_use = \
 # Set the control flow
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
-do_download = True
-do_bksub = True
-do_grid = True
+do_download = False
+do_bksub = False
+do_grid = False
 do_estcont = True
-do_lines = True
+do_lines = False
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Loop over targets
@@ -50,7 +41,8 @@ for this_gal, this_rad in gal_list.items():
     
     root_dir = '../../test_data/spherex/'
     gal_dir = root_dir + this_gal + '/'
-    outdir = gal_dir + 'raw/'    
+    raw_dir = gal_dir + 'raw/'
+    bksub_dir = gal_dir + 'bksub/'
     alt_dirs = ['../../test_data/spherex/*/raw/']
 
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
@@ -63,8 +55,9 @@ for this_gal, this_rad in gal_list.items():
         
         if os.path.isdir(gal_dir) == False:
             os.system('mkdir '+gal_dir)
-        if os.path.isdir(outdir) == False:
-            os.system('mkdir '+outdir)
+
+        if os.path.isdir(raw_dir) == False:
+            os.system('mkdir '+raw_dir)
 
         # Query IRSA to get the list of images
             
@@ -80,7 +73,7 @@ for this_gal, this_rad in gal_list.items():
         downloaded_images = \
             download_images(
                 image_tab,
-                outdir = outdir,
+                outdir = raw_dir,
                 alt_dirs = alt_dirs,
                 incremental = True,
                 verbose = True)
@@ -91,13 +84,22 @@ for this_gal, this_rad in gal_list.items():
         
     if do_bksub:
 
-        lvl2_im_list = glob.glob(outdir+'levels2_*.fits')
+        # Create the background subtracted directory
+        
+        if os.path.isdir(bksub_dir) == False:
+            os.system('mkdir '+bksub_dir)
+
+        # Find the level 2 images
+            
+        lvl2_im_list = glob.glob(raw_dir+'level2_*.fits')
     
         # Background subtract then write out result as a file
+        
         bksub_im_list = \
             bksub_images(
                 image_list = lvl2_im_list,
-                outdir = outdir,
+                indir_ext = 'raw/',
+                outdir_ext = 'bksub/',
                 sub_zodi = True,
                 gal_coord = None,
                 gal_rad_deg = 10./60.,
@@ -110,28 +112,23 @@ for this_gal, this_rad in gal_list.items():
     # Grid into a cube
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
         
-    if grid_cube:
+    if do_grid:
     
         cube_hdu = make_cube_header(
             center_coord = this_gal,
             #pix_scale = 6. / 3600.,
             pix_scale = 3. / 3600.,
-            extent = 60. / 60., 
+            extent = this_rad.to(u.deg).value, 
             lam_min = 0.75, lam_max = 5.2, lam_step = 0.0075,
             return_header=False)
 
-        im_list = glob.glob(outdir+'*.fits')
+        im_list = glob.glob(bksub_dir+'bksub*.fits')
 
         grid_spherex_cube(
             target_hdu = cube_hdu,
             image_list = im_list,
+            ext_to_use = 'BKSUB',            
             outfile = gal_dir + this_gal+'_spherex_cube.fits',
-            sub_zodi = True,
-            sub_bkgrd = True,
-            gal_coord = None,
-            gal_rad_deg = 10.0/60.0,
-            gal_incl = 0.,
-            gal_pa = 0.,
             flags_to_use = flags_to_use,
             overwrite = True)
 
@@ -141,7 +138,14 @@ for this_gal, this_rad in gal_list.items():
 
     if do_estcont:
 
-        pass
+        estimate_continuum(
+            cube = gal_dir + this_gal+'_spherex_cube.fits',
+            features_to_flag = {
+                1.875:0.04,
+                4.052:0.04,
+            },
+            outfile = gal_dir + this_gal+'_spherex_smooth.fits',
+            overwrite=True)
     
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
     # Make line images

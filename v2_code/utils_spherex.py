@@ -27,8 +27,12 @@ from reproject.mosaicking import find_optimal_celestial_wcs
 
 from astropy.utils.console import ProgressBar
 
+# Could move ths into the file
 from utils_z0mgs_images import deproject
 
+# Used to analyze the cube
+from scipy.interpolate import make_smoothing_spline
+from spectral_cube import SpectralCube
 
 #import warnings
 #warnings.filterwarnings('ignore', category=UserWarning)
@@ -119,11 +123,12 @@ def download_images(
         images: Table,
         max_images: int = None,
         outdir: str = '',
+        alt_dirs: list = [str],
         incremental: bool = True,
         verbose: bool = True) -> list[str]:
     """Download SPHEREX images from a table produced by the IRSA query above.
 
-    Modified from version by Adam Ginsburg.
+    Modified from an original version by Adam Ginsburg.
     
     Parameters
     ----------
@@ -136,6 +141,9 @@ def download_images(
 
     outdir : str, optional
              Location where the download directs
+
+    alt_dirs : list of strings, optional
+             Alternative directories where the file might be
 
     incremental : bool, default True
                   Check if file is present before download
@@ -202,8 +210,10 @@ def download_images(
             obs_fname = this_url.split('/')[-1]            
             this_fname = outdir + obs_fname
 
-            # Check if the filename is present already and either delete
-            # the file or proceed with a notification.
+            # Check if the filename is present already. If incremental
+            # is set to True proceed with a notification. Else delete
+            # the file.
+                
             if os.path.isfile(this_fname):
                 if incremental:
                     if verbose:
@@ -216,6 +226,28 @@ def download_images(
                         print(f"  Image {ii+1}/{len(images)}: {this_fname} already exists.")
                         print(f"  Incremental is set to FALSE. Will proceed and overwrite.")
                     os.system('rm -rf '+this_fname)
+            else:
+
+                # If the file is not found but some alternate
+                # locations are supplied and the user has set
+                # "incremental" then search those (using glob to allow
+                # wildcards) and see if the file is there. If so copy
+                # it.
+                
+                if (len(alt_dirs) > 0) and incremental:
+                    found_file_elsewhere = False
+                    for this_alt_dir in alt_dirs:
+                        if found_file_elsewhere:
+                            continue
+                        
+                        alt_flist = glob.glob(this_alt_dir+obs_fname)                        
+                        if len(alt_flist) > 0:
+                            found_file_elsewhere = True
+                            print(f"  Image {ii+1}/{len(images)}: {this_fname} already exists but in another directory.")
+                            print(f"  Incremental is set to TRUE.")
+                            print(f"  Copying the file.")
+                            os.system('cp '+this_alt_dir+obs_fname+' '+this_fname)
+                            downloaded_files.append(str(this_fname))
 
             # Download the file
             if verbose:
@@ -261,7 +293,7 @@ def download_images(
     return(downloaded_files)
 
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
-# Routines to support build a cube
+# Routines to support building a cube
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def make_wavelength_image(
@@ -537,9 +569,240 @@ def spherex_flag_dict():
     }
     
     return(this_dict)
+
+def estimate_spherex_bkgrd(
+        image = None,
+        header = None,
+        lam = None,
+        bw = None,
+        gal_coord = None,
+        gal_rad_deg = 10./60.,
+        gal_incl = 0.0,
+        gal_pa = 0.0,
+        frac_bw_step = 0.25,
+        ):
+    """
+    """
+
+    # Initialize
+    bkgrd = np.zeros_like(image)
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Mask out the galaxy
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=    
+
+    # Set the center to the image center if not supplied
+    if gal_coord is None:
+        ny, nx = image.shape
+        wcs = WCS(header)
+        gal_coord = pixel_to_skycoord(nx / 2, ny / 2, wcs, origin=0)
+        
+    # Calculate the galaxy footprint
+    radius_deg, projang_deg = \
+        deproject(
+            center_coord=gal_coord, incl=gal_incl, pa=gal_pa,
+            template_header = header,
+            return_offset = False)
     
+    # Create a copy with the galaxy masked
+    temp_data = image.copy()
+    gal_ind = np.where(radius_deg < gal_rad_deg)
+    temp_data[gal_ind] = np.nan
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Fit a median at each wavelength
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+            
+    med_bw = np.nanmedian(bw.to(u.um)).value
+    min_lam = np.nanmin(lam).value
+    max_lam = np.nanmax(lam).value
+
+    step = med_bw * frac_bw_step
+    
+    lams_for_bkgrd = np.arange(min_lam-med_bw,
+                               max_lam+med_bw, step)
+
+    for this_lam in lams_for_bkgrd:
+        
+        this_ind = np.where(np.abs(lam.value - this_lam) <= 0.5*step)
+        if len(this_ind) == 0:
+            continue
+        this_bkgrd_val = np.nanmedian(temp_data[this_ind])
+        bkgrd[this_ind] = this_bkgrd_val
+
+    return(bkgrd)
+
+def bksub_images(
+        image_list = None,
+        indir_ext = 'raw/',
+        outdir_ext = 'bksub/',
+        gal_coord = None,
+        gal_rad_deg = 10./60.,
+        gal_incl = 0.0,
+        gal_pa = 0.0,
+        frac_bw_step = 0.25,        
+        sub_zodi = True,
+        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                       'HOT','COLD','NONLINEAR','PERSIST'],
+        overwrite = True):
+    """
+    """
+
+    # Loop over the provided image list
+
+    bksub_image_list = []
+    
+    for this_fname in ProgressBar(image_list):
+
+        this_hdu_list = fits.open(this_fname)
+
+        # Separate the file name and check if the file already exists
+        
+        outname_bksub = this_fname.replace(indir_ext+'level2',
+                                           outdir_ext+'bksub_level2')
+        outname_bkgrd = this_fname.replace(indir_ext+'level2',
+                                           outdir_ext+'bkgrd_level2')
+
+        if os.path.isfile(outname_bksub) and overwrite == False:
+            bksub_image_list.append(outname_bksub)
+            continue
+
+        # Make an image of wavelength and bandwidth
+        
+        lam, bw = make_wavelength_image(
+            hdu_list = this_hdu_list,
+            use_hdu = 'IMAGE',
+        )
+
+        # Implement flags
+
+        hdu_flags = this_hdu_list['FLAGS']        
+        mask = make_mask_from_flags(
+            hdu_flags.data,
+            flags_to_use = flags_to_use,
+        )
+
+        hdu_image = this_hdu_list['IMAGE']
+        image_header = hdu_image.header
+        masked_data = hdu_image.data.copy()
+        masked_data[mask] = np.nan
+
+        # Subtract the zodiacal light if desired
+        
+        if sub_zodi:
+            hdu_zodi = this_hdu_list['ZODI']            
+            masked_data = masked_data - hdu_zodi.data
+
+        # Fit a background (or leave it at 0.0)
+        
+        bkgrd = estimate_spherex_bkgrd(
+            image = masked_data,
+            header = image_header,
+            lam = lam,
+            bw = bw,
+            gal_coord = gal_coord,
+            gal_rad_deg = gal_rad_deg,
+            gal_incl = gal_incl,
+            gal_pa = gal_pa,
+            frac_bw_step = frac_bw_step,
+        )
+
+        # Subtract the background
+        
+        masked_data -= bkgrd
+
+        # Save in FITS HDUs
+        
+        hdu_masked_image = fits.ImageHDU(data=masked_data, header=image_header,
+                                        name='BKSUB')
+        hdu_bkgrd_image = fits.ImageHDU(data=bkgrd, header=image_header,
+                                        name='BKGRD')
+        this_hdu_list.insert(0,hdu_masked_image)
+        this_hdu_list.append(hdu_bkgrd_image)
+        
+        # Write out to images
+        
+        this_hdu_list.writeto(outname_bksub, overwrite=overwrite)
+        
+    return(bksub_image_list)
+
+
+def make_mask_from_flags(
+        flag_image,
+        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                        'HOT','COLD','NONLINEAR','PERSIST'],        
+):
+    """Given a list of flag names to use construct a mask from the input
+    flag image. The flag image is a bitmask, and the mapping between
+    flags and bits is defined in the explanatory supplement and coded
+    into a dictionary above.
+
+    THIS COULD ALL USE CHECKING!!!
+
+    """
+
+    # From the explanatory supplement
+
+    # Suggested flags for background estimation masking:
+
+    # OVERFLOW
+    # SUR_ERROR
+    # NONFUNC
+    # MISSING_DATA
+    # HOT
+    # COLD
+    # NONLINEAR
+    # PERSIST
+    # OUTLIER
+    # SOURCE
+    # TRANSIENT
+
+    # Suggested flags for on source photometry:
+
+    # SUR_ERROR
+    # NONFUNC
+    # MISSING_DATA
+    # HOT
+    # COLD
+    # NONLINEAR
+    # PERSIST
+
+    use_flag_ind = []
+    flag_dict = spherex_flag_dict()
+    for this_flag in flags_to_use:
+        try:
+            this_ind = flag_dict[this_flag.upper()]
+        except KeyError:
+            print("Flag unrecognized: ", this_flag)
+            continue
+        use_flag_ind.append(this_ind)
+    
+    n_flags = 22
+
+    # Make an array of powers of 2 to cover each relevant bit
+    powers_of_2 = 1 << np.arange(n_flags)
+
+    # Copy the flag image to AND against each flag
+    flag_cube = np.repeat(flag_image[:,:,np.newaxis], n_flags, axis=2)
+    
+    # Use bitwise AND to hash against each flag
+    mask_cube = (flag_cube & powers_of_2) != 0
+    
+    # Initialize the image mask
+    mask = np.zeros_like(flag_image, dtype=bool)
+
+    # Loop over and accumulate the requested flags
+    for ii in np.arange(n_flags):
+
+        if ii not in use_flag_ind:
+            continue
+
+        mask = mask | (mask_cube[:,:,ii])
+        
+    return(mask)
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
-# Routine to actually build a cube
+# Routine to extract an SED
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def extract_spherex_sed(
@@ -640,101 +903,21 @@ def extract_spherex_sed(
     
     return(tab)
 
-def make_mask_from_flags(
-        flag_image,
-        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST'],        
-):
-    """Given a list of flag names to use construct a mask from the input
-    flag image. The flag image is a bitmask, and the mapping between
-    flags and bits is defined in the explanatory supplement and coded
-    into a dictionary above.
-
-    THIS COULD ALL USE CHECKING!!!
-
-    """
-
-    # From the explanatory supplement
-
-    # Suggested flags for background estimation masking:
-
-    # OVERFLOW
-    # SUR_ERROR
-    # NONFUNC
-    # MISSING_DATA
-    # HOT
-    # COLD
-    # NONLINEAR
-    # PERSIST
-    # OUTLIER
-    # SOURCE
-    # TRANSIENT
-
-    # Suggested flags for on source photometry:
-
-    # SUR_ERROR
-    # NONFUNC
-    # MISSING_DATA
-    # HOT
-    # COLD
-    # NONLINEAR
-    # PERSIST
-
-    use_flag_ind = []
-    flag_dict = spherex_flag_dict()
-    for this_flag in flags_to_use:
-        try:
-            this_ind = flag_dict[this_flag.upper()]
-        except KeyError:
-            print("Flag unrecognized: ", this_flag)
-            continue
-        use_flag_ind.append(this_ind)
-    
-    n_flags = 22
-
-    # Make an array of powers of 2 to cover each relevant bit
-    powers_of_2 = 1 << np.arange(n_flags)
-
-    # Copy the flag image to AND against each flag
-    flag_cube = np.repeat(flag_image[:,:,np.newaxis], n_flags, axis=2)
-    
-    # Use bitwise AND to hash against each flag
-    mask_cube = (flag_cube & powers_of_2) != 0
-    
-    # Initialize the image mask
-    mask = np.zeros_like(flag_image, dtype=bool)
-
-    # Loop over and accumulate the requested flags
-    for ii in np.arange(n_flags):
-
-        if ii not in use_flag_ind:
-            continue
-
-        mask = mask | (mask_cube[:,:,ii])
-        
-    return(mask)
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Routine to actually build a cube
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def grid_spherex_cube(
         target_hdu = None,
         image_list = [],
-        sub_zodi = True,
         flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
                         'HOT','COLD','NONLINEAR','PERSIST'],
-        sub_bkgrd = True,
-        gal_coord = None,
-        gal_rad_deg = 10.0/60.0,
-        gal_incl = 0.,
-        gal_pa = 0.,
+        ext_to_use = 'IMAGE',
         outfile = None,
         overwrite=True):
     """Grid all images from an image_list into a cube and optionally
     writes the cube to an output file along with a set of supporting
     files.
-
-    Optionally subtracts the zodiacal light model provided with the
-    SPHEREx data.
-
-    Lets the user specify which of the provided flags to apply.
 
     Can toggle background fitting on and off.
 
@@ -768,92 +951,29 @@ def grid_spherex_cube(
     bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
     bw_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
 
-    bkgrd_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    bkgrd_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over the image list
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
     for this_fname in ProgressBar(image_list):        
+
+        # Open this file
         
         this_hdu_list = fits.open(this_fname)
-        hdu_image = this_hdu_list['IMAGE']
-        hdu_flags = this_hdu_list['FLAGS']
-        hdu_zodi = this_hdu_list['ZODI']        
+        hdu_image = this_hdu_list[ext_to_use]
         image_header = hdu_image.header
+
+        # Calculate wavelength and bandwidth per pixel
         
         lam, bw = make_wavelength_image(
             hdu_list = this_hdu_list,
-            use_hdu = 'IMAGE',
+            use_hdu = ext_to_use,
         )
+
+        # Make FITS HDUs (in memory) out of the wavelength and bandwidth
         
         hdu_lam = fits.PrimaryHDU(lam, image_header)
         hdu_bw = fits.PrimaryHDU(bw, image_header)
-
-        # Implement flags and subtract ZODI if requested
-
-        mask = make_mask_from_flags(
-            hdu_flags.data,
-            flags_to_use = flags_to_use,
-        )
-
-        if sub_zodi:
-            masked_data = hdu_image.data - hdu_zodi.data
-        else:
-            masked_data = hdu_image.data
-            
-        masked_data[mask] = np.nan
-        hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
-
-        # Fit a background (or leave it at 0.0)
-        bkgrd = np.zeros_like(masked_data)        
-        if sub_bkgrd:
-
-            # ................................
-            # Mask out the galaxy
-            # ................................            
-
-            # Set the center to the image center if not supplied
-            if gal_coord is None:
-                ny, nx = hdu_image.shape
-                wcs = WCS(hdu_image.header)
-                gal_coord = pixel_to_skycoord(nx / 2, ny / 2, wcs, origin=0)
-
-            # Calculate the galaxy footprint
-            radius_deg, projang_deg = \
-                deproject(
-                    center_coord=gal_coord, incl=gal_incl, pa=gal_pa,
-                    template_header = hdu_image.header,
-                    return_offset = False)
-
-            # Create a copy with the galaxy masked
-            temp_data = masked_data.copy()
-            gal_ind = np.where(radius_deg < gal_rad_deg)
-            temp_data[gal_ind] = np.nan
-
-            # ................................            
-            # Fit a median at each wavelength
-            # ................................
-            
-            med_bw = np.nanmedian(bw.to(u.um)).value
-            min_lam = np.nanmin(lam).value
-            max_lam = np.nanmax(lam).value
-            
-            lams_for_bkgrd = np.arange(min_lam-med_bw,
-                                       max_lam+med_bw, med_bw)
-
-            for this_lam in lams_for_bkgrd:
-
-                this_ind = np.where(np.abs(lam.value - this_lam) <= 0.5*med_bw)
-                if len(this_ind) == 0:
-                    continue
-                this_bkgrd_val = np.nanmedian(temp_data[this_ind])
-                bkgrd[this_ind] = this_bkgrd_val
-                
-        masked_data -= bkgrd
-        hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
-        hdu_bkgrd_image = fits.PrimaryHDU(bkgrd, image_header)
 
         # This is pretty annoyingly inefficient to repeat three
         # reprojects, but for now it is what it is. Reproject image,
@@ -862,7 +982,7 @@ def grid_spherex_cube(
         missing = np.nan
         
         reprojected_image, footprint_image = \
-            reproject_interp(hdu_masked_image, target_header_2d, order='bilinear')
+            reproject_interp(hdu_image, target_header_2d, order='bilinear')
         reprojected_image[footprint_image == 0] = missing
 
         reprojected_lam, footprint_lam = \
@@ -873,17 +993,21 @@ def grid_spherex_cube(
             reproject_interp(hdu_bw, target_header_2d, order='bilinear')
         reprojected_bw[footprint_bw == 0] = missing        
 
-        reprojected_bkgrd, footprint_bkgrd = \
-            reproject_interp(hdu_bkgrd_image, target_header_2d, order='bilinear')
-        reprojected_bkgrd[footprint_bkgrd == 0] = missing        
-
-        # Now loop over the wavelength range we consider
+        # Note the lowest and highest wavelength in the reprojected image
         
         min_lam = np.nanmin(reprojected_lam - reprojected_bw - lam_step)
         max_lam = np.nanmax(reprojected_lam + reprojected_bw + lam_step)
 
+        #print("\n")
+        #print(min_lam, max_lam)
+        #print("\n")
+        
+        # Error checking
+        
         overlap_pix = np.sum(footprint_image)
         pix_in_cube = 0.0
+
+        # Loop over wavelength steps
         
         for zz, this_lam in enumerate(lam_array):
 
@@ -895,7 +1019,8 @@ def grid_spherex_cube(
             if this_lam > max_lam:
                 continue            
 
-            # Compare each pixel to the center of the current channel
+            # Compare the wavelength at each pixel to the center of
+            # the current channel
             
             delta = np.abs(this_lam - reprojected_lam)
             weight = delta*0.0 + 1.0
@@ -923,13 +1048,6 @@ def grid_spherex_cube(
 
             bw_weight_cube[z_ind, y_ind, x_ind] = \
                 bw_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
-
-            bkgrd_sum_cube[z_ind, y_ind, x_ind] = \
-                bkgrd_sum_cube[z_ind, y_ind, x_ind] + \
-                (reprojected_bkgrd[y_ind, x_ind]*weight[y_ind, x_ind])
-
-            bkgrd_weight_cube[z_ind, y_ind, x_ind] = \
-                bkgrd_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
             
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Output and return
@@ -944,8 +1062,8 @@ def grid_spherex_cube(
 
     weight_hdu = fits.PrimaryHDU(weight_cube, target_header)
     if outfile is not None:
-        cube_hdu.writeto(outfile.replace('.fits','_weight.fits')
-                         , overwrite=overwrite)
+        weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
+                           , overwrite=overwrite)
         
     bw_cube = bw_sum_cube / bw_weight_cube
     bw_cube[np.where(bw_weight_cube == 0.0)] = np.nan
@@ -960,26 +1078,14 @@ def grid_spherex_cube(
 
     bw_weight_hdu = fits.PrimaryHDU(bw_weight_cube, bw_header)
     if outfile is not None:
-        bw_hdu.writeto(outfile.replace('.fits','_bwweight.fits')
-                       , overwrite=overwrite)
-        
-    bkgrd_cube = bkgrd_sum_cube / bkgrd_weight_cube
-    bkgrd_cube[np.where(bkgrd_weight_cube == 0.0)] = np.nan
-
-    bkgrd_header = target_header.copy()
-    bkgrd_header['BUNIT'] = 'MICRONS'
-    
-    bkgrd_hdu = fits.PrimaryHDU(bkgrd_cube, bkgrd_header)
-    if outfile is not None:
-        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrd.fits')
-                       , overwrite=overwrite)
-
-    bkgrd_weight_hdu = fits.PrimaryHDU(bkgrd_weight_cube, bkgrd_header)
-    if outfile is not None:
-        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrdweight.fits')
-                       , overwrite=overwrite)
+        bw_weight_hdu.writeto(outfile.replace('.fits','_bwweight.fits')
+                              , overwrite=overwrite)
     
     return(cube_hdu)
+
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Routine to make a line map
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def spherex_line_image(
         target_hdu = None,
@@ -992,6 +1098,11 @@ def spherex_line_image(
         operation = 'integrate',
         flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
                         'HOT','COLD','NONLINEAR','PERSIST'],
+        sub_bkgrd = True,
+        gal_coord = None,
+        gal_rad_deg = 10.0/60.0,
+        gal_incl = 0.,
+        gal_pa = 0.,
         outfile = None,
         overwrite = True):
     """
@@ -1037,6 +1148,9 @@ def spherex_line_image(
 
     sum_image = np.zeros((ny,nx),dtype=np.float32)
     weight_image = np.zeros((ny,nx),dtype=np.float32)
+
+    bkgrd_sum_image = np.zeros((ny,nx),dtype=np.float32)
+    bkgrd_weight_image = np.zeros((ny,nx),dtype=np.float32)
     
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over the image list
@@ -1080,8 +1194,26 @@ def spherex_line_image(
             masked_data = hdu_image.data
             
         masked_data[mask] = np.nan
+
+        # Fit a background (or leave it at 0.0)
+        if sub_bkgrd:
+            bkgrd = estimate_spherex_bkgrd(
+                image = masked_data,
+                header = image_header,
+                lam = lam,
+                bw = bw,
+                gal_coord = gal_coord,
+                gal_rad_deg = gal_rad_deg,
+                gal_incl = gal_incl,
+                gal_pa = gal_pa,
+            )
+        else:
+            bkgrd = np.zeros_like(masked_data)
+
+        masked_data -= bkgrd
         hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
-        
+        hdu_bkgrd_image = fits.PrimaryHDU(bkgrd, image_header)
+
         # This is pretty annoyingly inefficient to repeat three
         # reprojects, but for now it is what it is. Reproject image,
         # wavelength, and bandwidth to the target header.
@@ -1099,6 +1231,10 @@ def spherex_line_image(
         reprojected_bw, footprint_bw = \
             reproject_interp(hdu_bw, target_header_2d, order='bilinear')
         reprojected_bw[footprint_bw == 0] = missing        
+
+        reprojected_bkgrd, footprint_bkgrd = \
+            reproject_interp(hdu_bkgrd_image, target_header_2d, order='bilinear')
+        reprojected_bkgrd[footprint_bkgrd == 0] = missing        
 
         weight = np.isfinite(reprojected_image)*1.0
         
@@ -1166,7 +1302,14 @@ def spherex_line_image(
         weight_image[y_ind, x_ind] = \
             weight_image[y_ind, x_ind] + \
             (weight[y_ind, x_ind])        
+
+        bkgrd_sum_image[y_ind, x_ind] = \
+            bkgrd_sum_image[y_ind, x_ind] + \
+            (reprojected_bkgrd[y_ind, x_ind]*weight[y_ind, x_ind])
         
+        bkgrd_weight_image[y_ind, x_ind] = \
+            bkgrd_weight_image[y_ind, x_ind] + weight[y_ind, x_ind]
+
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Output and return
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1182,6 +1325,66 @@ def spherex_line_image(
     if outfile is not None:
         weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
                            , overwrite=overwrite)
-        
+
+    bkgrd_image = bkgrd_sum_image / bkgrd_weight_image
+    bkgrd_image[np.where(bkgrd_weight_image == 0.0)] = np.nan
+
+    bkgrd_header = target_header.copy()
+    bkgrd_header['BUNIT'] = 'MJy/sr'
+
+    bkgrd_hdu = fits.PrimaryHDU(bkgrd_image, bkgrd_header)
+    if outfile is not None:
+        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrd.fits')
+                       , overwrite=overwrite)
+
+    bkgrd_weight_hdu = fits.PrimaryHDU(bkgrd_weight_image, bkgrd_header)
+    if outfile is not None:
+        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrdweight.fits')
+                       , overwrite=overwrite)
+    
     return(image_hdu)
     
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Routine to estimate a smooth continuum
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
+def estimate_continuum(
+        cube = None,
+        features_to_flag = {},
+        outfile = None,
+        overwrite = True):
+    """
+    """
+
+    # Read the cube
+    sc = SpectralCube.read(cube)
+    vaxis = sc.spectral_axis
+    n_z, n_y, n_x = sc.shape
+
+    # Flag the lines in the cube (fix the broadcasting here later)
+    cube = sc.filled_data[:]
+    for this_lam, this_bw in features_to_flag.items():
+        mask_1d = np.abs(this_lam - vaxis.value) <= 0.5 * this_bw
+        mask_3d = np.broadcast_to(mask_1d[:,np.newaxis,np.newaxis],sc.shape)
+        cube[mask_3d] = np.nan
+    
+    # Loop over the spectra
+    cont_cube = np.zeros((n_z, n_y, n_x), dtype=np.float32)*np.nan
+    for yy in ProgressBar(range(n_y)):
+        for xx in range(n_x):
+            this_spec = (cube[:,yy,xx]).flatten()
+            ind = np.where(np.isfinite(this_spec))
+            this_x = vaxis[ind]
+            this_y = this_spec[ind]
+            cs = make_smoothing_spline(this_x, this_y, lam=0.01)
+            pred_y = cs(vaxis)
+            max_chan = np.max(ind)
+            cont_cube[:max_chan,yy,xx] = pred_y[:max_chan]
+
+    # Write the output
+    cont_hdu = fits.PrimaryHDU(cont_cube, sc.header)
+    if outfile is not None:
+        cont_hdu.writeto(outfile, overwrite=True)
+    return(cont_hdu)
+
+            
