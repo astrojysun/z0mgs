@@ -27,8 +27,9 @@ flags_to_use = \
 
 do_download = False
 do_bksub = False
+do_sed_cube = True
 do_grid = False
-do_estcont = True
+do_estcont = False
 do_lines = False
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
@@ -107,7 +108,32 @@ for this_gal, this_rad in gal_list.items():
                 gal_pa = 0.0,
                 frac_bw_step = 0.5,
             )
-        
+
+    # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+    # Make an ungridded "SED cube"
+    # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
+
+    if do_sed_cube:
+    
+        im_list = glob.glob(bksub_dir+'bksub*.fits')
+        n_images = len(im_list)
+
+        cube_hdu = make_cube_header(
+            center_coord = this_gal,
+            #pix_scale = 6. / 3600.,
+            pix_scale = 3. / 3600.,
+            extent = this_rad.to(u.deg).value, 
+            lam_min = 0, lam_max = n_images, lam_step = 1.0,
+            return_header=False)
+
+        build_sed_cube(
+            target_hdu = cube_hdu,
+            image_list = im_list,
+            flags_to_use = flags_to_use,
+            ext_to_use = 'IMAGE',
+            outfile = gal_dir + this_gal + '_spherex_seds.fits',
+            overwrite=True)
+    
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
     # Grid into a cube
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
@@ -152,6 +178,18 @@ for this_gal, this_rad in gal_list.items():
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
     if do_lines:
-
-        pass
+        
+        spherex_line_image(
+            target_hdu = None,
+            central_lam = 1.87,
+            vel_width = 500.,
+            frac_thresh = 0.75,
+            image_list = [],
+            continuum = None,
+            operation = 'integrate',
+            flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                            'HOT','COLD','NONLINEAR','PERSIST'],
+            outfile = None,
+            overwrite = True)
+        
     

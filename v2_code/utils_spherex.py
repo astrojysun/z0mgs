@@ -361,6 +361,7 @@ def make_cube_header(
         extent = None, extent_x = None, extent_y = None,
         nx = None, ny = None,
         lam_min = 0.7, lam_max = 5.2, lam_step = 0.02,
+        lam_unit = 'um',
         return_header=False):
     """Make a 2D FITS header centered on the coordinate of interest with a
     user-specififed pixel scale and extent and wavelength axis.
@@ -582,6 +583,7 @@ def estimate_spherex_bkgrd(
         frac_bw_step = 0.25,
         ):
     """
+    Estimate a wavelength dependent background for one image.
     """
 
     # Initialize
@@ -646,6 +648,7 @@ def bksub_images(
                        'HOT','COLD','NONLINEAR','PERSIST'],
         overwrite = True):
     """
+    Background subtract a set of SPHEREx images.
     """
 
     # Loop over the provided image list
@@ -907,6 +910,115 @@ def extract_spherex_sed(
 # Routine to actually build a cube
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
+def build_sed_cube(
+        target_hdu = None,
+        image_list = [],
+        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
+                        'HOT','COLD','NONLINEAR','PERSIST'],
+        ext_to_use = 'IMAGE',
+        outfile = None,
+        overwrite=True):
+    """Build cubes of wavelength, bandwidth, and intensity (without any
+    gridding) for a stack of SPHEREx images.
+    """
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Initialize the output
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    target_header = target_hdu.header
+    nx = target_header['NAXIS1']
+    ny = target_header['NAXIS2']
+    nz = target_header['NAXIS3']
+
+    target_header_2d = target_header.copy()
+    target_header_2d['NAXIS'] = 2
+    del target_header_2d['NAXIS3']
+    del target_header_2d['CRVAL3']
+    del target_header_2d['CDELT3']
+    del target_header_2d['CRPIX3']
+    del target_header_2d['CTYPE3']
+    del target_header_2d['CUNIT3']
+    
+    lam_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    bw_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    int_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Loop over images
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    zz = 0
+    for this_fname in ProgressBar(image_list):   
+
+        # Open this file
+        
+        this_hdu_list = fits.open(this_fname)
+        hdu_image = this_hdu_list[ext_to_use]
+        image_header = hdu_image.header
+
+        # Calculate wavelength and bandwidth per pixel
+        
+        lam, bw = make_wavelength_image(
+            hdu_list = this_hdu_list,
+            use_hdu = ext_to_use,
+        )
+
+        # Make FITS HDUs (in memory) out of the wavelength and bandwidth
+        
+        hdu_lam = fits.PrimaryHDU(lam, image_header)
+        hdu_bw = fits.PrimaryHDU(bw, image_header)
+
+        # Reproject image, wavelength, and bandwidth to target header
+        
+        missing = np.nan
+        
+        reprojected_image, footprint_image = \
+            reproject_interp(hdu_image, target_header_2d, order='bilinear')
+        reprojected_image[footprint_image == 0] = missing
+
+        reprojected_lam, footprint_lam = \
+            reproject_interp(hdu_lam, target_header_2d, order='bilinear')
+        reprojected_lam[footprint_lam == 0] = missing
+
+        reprojected_bw, footprint_bw = \
+            reproject_interp(hdu_bw, target_header_2d, order='bilinear')
+        reprojected_bw[footprint_bw == 0] = missing                
+
+        # Record these into the cubes
+
+        lam_cube[zz,:,:] = reprojected_lam
+        bw_cube[zz,:,:] = reprojected_bw
+        int_cube[zz,:,:] = reprojected_image
+        
+        zz += 1
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Write to disk
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    int_header = target_header.copy()
+    int_header['BUNIT'] = 'MJy / sr'
+    int_hdu = fits.PrimaryHDU(int_cube, int_header)
+    if outfile is not None:
+        int_hdu.writeto(outfile, overwrite=overwrite)
+
+    lam_header = target_header.copy()
+    lam_header['BUNIT'] = 'um'
+    lam_hdu = fits.PrimaryHDU(lam_cube, lam_header)
+    if outfile is not None:
+        lam_hdu.writeto(outfile.replace('.fits','_lam.fits')
+                        , overwrite=overwrite)
+        
+    bw_header = target_header.copy()
+    bw_header['BUNIT'] = 'um'
+    bw_hdu = fits.PrimaryHDU(bw_cube, bw_header)
+    if outfile is not None:
+        bw_hdu.writeto(outfile.replace('.fits','_bw.fits')
+                        , overwrite=overwrite)
+        
+    return((int_hdu, lam_hdu, bw_hdu))
+
 def grid_spherex_cube(
         target_hdu = None,
         image_list = [],
@@ -918,9 +1030,6 @@ def grid_spherex_cube(
     """Grid all images from an image_list into a cube and optionally
     writes the cube to an output file along with a set of supporting
     files.
-
-    Can toggle background fitting on and off.
-
     """
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1093,16 +1202,10 @@ def spherex_line_image(
         vel_width = 500.,
         frac_thresh = 0.75,
         image_list = [],
-        sub_zodi = True,
         continuum = None,
         operation = 'integrate',
         flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
                         'HOT','COLD','NONLINEAR','PERSIST'],
-        sub_bkgrd = True,
-        gal_coord = None,
-        gal_rad_deg = 10.0/60.0,
-        gal_incl = 0.,
-        gal_pa = 0.,
         outfile = None,
         overwrite = True):
     """
@@ -1347,6 +1450,9 @@ def spherex_line_image(
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routine to estimate a smooth continuum
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
+# God this is slow - but it does work nicely. Consult on some
+# speedups.
 
 def estimate_continuum(
         cube = None,
