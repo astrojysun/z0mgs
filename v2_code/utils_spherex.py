@@ -1123,14 +1123,14 @@ def grid_spherex_cube(
             
             sum_cube[z_ind, y_ind, x_ind] = \
                 sum_cube[z_ind, y_ind, x_ind] + \
-                int_cube[zz, y_ind, x_ind]*1.0
+                int_cube[sed_ind, y_ind, x_ind]*1.0
 
             bw_sum_cube[z_ind, y_ind, x_ind] = \
                  bw_sum_cube[z_ind, y_ind, x_ind] + \
-                 bw_cube[zz, y_ind, x_ind]*1.0
+                 bw_cube[sed_ind, y_ind, x_ind]*1.0
             
             weight_cube[z_ind, y_ind, x_ind] = \
-                  weight_cube[zz, y_ind, x_ind] + 1.0
+                  weight_cube[sed_ind, y_ind, x_ind] + 1.0
 
         # Calculate weighted average
             
