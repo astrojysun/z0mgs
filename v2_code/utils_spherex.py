@@ -638,6 +638,8 @@ def bksub_images(
         image_list = None,
         indir_ext = 'raw/',
         outdir_ext = 'bksub/',
+        # These parameters determin what mask to apply to avoid
+        # subtracting the galaxy
         gal_coord = None,
         gal_rad_deg = 10./60.,
         gal_incl = 0.0,
@@ -647,8 +649,30 @@ def bksub_images(
         flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
                        'HOT','COLD','NONLINEAR','PERSIST'],
         overwrite = True):
-    """
-    Background subtract a set of SPHEREx images.
+    """Background subtract a set of SPHEREx images.
+
+    image_list: list of images to process
+
+    indir_ext ( 'raw/' ) : images are assumed to have indir_ext in the
+    file path, which is swapped to outdir_ext for output
+
+    outdir_ext ( 'bksub/' ) : see above
+
+    sub_zodi ( True ) : subtract zodiacal light before doing anything else
+
+    frac_bw_step ( 0.25 ) : fraction of the typical bandwidth to step
+    by when dividing the image into wavelength bins
+
+    Parameters to define a simple mask for the location of the galaxy
+    to avoid including it in the background estimate.
+
+    gal_coord ( None ) : if None takes image center
+
+    gal_rad_deg ( 10./60. ) : radius in degrees
+    
+    gal_incl ( 0.0 ) : inclination in degrees
+    gal_pa ( 0.0 ) : position angle in degrees
+
     """
 
     # Loop over the provided image list
@@ -907,19 +931,19 @@ def extract_spherex_sed(
     return(tab)
 
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
-# Routine to actually build a cube
+# Routines to cubes
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def build_sed_cube(
         target_hdu = None,
         image_list = [],
-        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST'],
         ext_to_use = 'IMAGE',
         outfile = None,
         overwrite=True):
     """Build cubes of wavelength, bandwidth, and intensity (without any
-    gridding) for a stack of SPHEREx images.
+    gridding) for a stack of SPHEREx images. By loading all three,
+    this produces the measured SED at each location in the cube.
+
     """
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1020,151 +1044,106 @@ def build_sed_cube(
     return((int_hdu, lam_hdu, bw_hdu))
 
 def grid_spherex_cube(
-        target_hdu = None,
-        image_list = [],
-        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST'],
-        ext_to_use = 'IMAGE',
+        # Input cubes
+        int_cube = None,
+        lam_cube = None,
+        bw_cube = None,
+        # Desired wavelength grid
+        lam_min = 0.7, lam_max = 5.2, lam_step = 0.02,
+        lam_unit = 'um'
+        # Method
+        method = 'TOPHAT',
         outfile = None,
         overwrite=True):
-    """Grid all images from an image_list into a cube and optionally
-    writes the cube to an output file along with a set of supporting
-    files.
+    """Grid an SED cube like the one produced by BUILD_SED_CUBE into a
+    regular cube with a grid of wavelengths.
+
     """
 
+    if lam_cube is None:
+        lam_cube = int_cube.replace('.fits','_lam.fits')        
+        
+    if bw_cube is None:
+        bw_cube = int_cube.replace('.fits','_bw.fits')
+
+    int_hdu = fits.open(int_cube)[0]
+    lam_hdu = fits.open(lam_cube)[0]
+    bw_hdu = fits.open(bw_cube)[0]
+
+    int_cube = int_hdu.data
+    lam_cube = lam_hdu.data
+    bw_cube = bw_hdu.data    
+
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Initialize the output
+    # Initialize header and output
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-    target_header = target_hdu.header
+    target_header = int_hdu.header.copy()
     nx = target_header['NAXIS1']
     ny = target_header['NAXIS2']
-    nz = target_header['NAXIS3']
 
-    target_header_2d = target_header.copy()
-    target_header_2d['NAXIS'] = 2
-    del target_header_2d['NAXIS3']
-    del target_header_2d['CRVAL3']
-    del target_header_2d['CDELT3']
-    del target_header_2d['CRPIX3']
-    del target_header_2d['CTYPE3']
-    del target_header_2d['CUNIT3']
+    # Hack to desired new wavelength axis    
+    lam_array = np.arange(lam_min, lam_max + lam_step, lam_step)
+    nz = len(lam_array)
+    target_header['NAXIS'] = 3
     
-    lam_step = target_header['CDELT3']    
-    lam_array = (np.arange(nz)-(target_header['CRPIX3']-1))* \
-        lam_step + target_header['CRVAL3']
-    
-    sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-
-    bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    bw_weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    hdu.header['NAXIS3'] = nz
+    hdu.header['CTYPE3'] = 'WAVE'
+    hdu.header['CUNIT3'] = lam_unit
+    hdu.header['CRPIX3'] = 1
+    hdu.header['CRVAL3'] = lam_array[0]
+    hdu.header['CDELT3'] = lam_step
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Loop over the image list
+    # Loop over channels or pixels
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-    for this_fname in ProgressBar(image_list):        
+    if method == 'TOPHAT':
 
-        # Open this file
+        sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+        bw_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+        wt_cube = np.zeros((nz,ny,nx),dtype=np.float32)
         
-        this_hdu_list = fits.open(this_fname)
-        hdu_image = this_hdu_list[ext_to_use]
-        image_header = hdu_image.header
+        for zz in ProgressBar(range(nz)):
 
-        # Calculate wavelength and bandwidth per pixel
-        
-        lam, bw = make_wavelength_image(
-            hdu_list = this_hdu_list,
-            use_hdu = ext_to_use,
-        )
-
-        # Make FITS HDUs (in memory) out of the wavelength and bandwidth
-        
-        hdu_lam = fits.PrimaryHDU(lam, image_header)
-        hdu_bw = fits.PrimaryHDU(bw, image_header)
-
-        # This is pretty annoyingly inefficient to repeat three
-        # reprojects, but for now it is what it is. Reproject image,
-        # wavelength, and bandwidth to the target header
-        
-        missing = np.nan
-        
-        reprojected_image, footprint_image = \
-            reproject_interp(hdu_image, target_header_2d, order='bilinear')
-        reprojected_image[footprint_image == 0] = missing
-
-        reprojected_lam, footprint_lam = \
-            reproject_interp(hdu_lam, target_header_2d, order='bilinear')
-        reprojected_lam[footprint_lam == 0] = missing
-
-        reprojected_bw, footprint_bw = \
-            reproject_interp(hdu_bw, target_header_2d, order='bilinear')
-        reprojected_bw[footprint_bw == 0] = missing        
-
-        # Note the lowest and highest wavelength in the reprojected image
-        
-        min_lam = np.nanmin(reprojected_lam - reprojected_bw - lam_step)
-        max_lam = np.nanmax(reprojected_lam + reprojected_bw + lam_step)
-
-        #print("\n")
-        #print(min_lam, max_lam)
-        #print("\n")
-        
-        # Error checking
-        
-        overlap_pix = np.sum(footprint_image)
-        pix_in_cube = 0.0
-
-        # Loop over wavelength steps
-        
-        for zz, this_lam in enumerate(lam_array):
-
-            # Skip this channel if there's no overlap with the current image
-            
-            if this_lam < min_lam:
-                continue
-
-            if this_lam > max_lam:
-                continue            
+            this_lam = lam_array[zz]
 
             # Compare the wavelength at each pixel to the center of
-            # the current channel
+            # the current channel in units of bandwidth
             
-            delta = np.abs(this_lam - reprojected_lam)
-            weight = delta*0.0 + 1.0
+            delta = np.abs(this_lam - lam_cube)/bw_cube
             
             # Keep the pixels where that difference is less than half
             # the bandwidth
             
-            y_ind, x_ind = \
-                np.where(delta <= (reprojected_bw*0.5))
-
-            pix_in_cube += len(y_ind)
+            sed_ind, y_ind, x_ind = \
+                np.where(delta <= 0.5)
             
             z_ind = np.zeros_like(y_ind,dtype=int)+zz
             
             sum_cube[z_ind, y_ind, x_ind] = \
                 sum_cube[z_ind, y_ind, x_ind] + \
-                (reprojected_image[y_ind, x_ind]*weight[y_ind, x_ind])
-
-            weight_cube[z_ind, y_ind, x_ind] = \
-                weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+                (int_cube[y_ind, x_ind]*weight[y_ind, x_ind])
 
             bw_sum_cube[z_ind, y_ind, x_ind] = \
                 bw_sum_cube[z_ind, y_ind, x_ind] + \
-                (reprojected_bw[y_ind, x_ind]*weight[y_ind, x_ind])
-
-            bw_weight_cube[z_ind, y_ind, x_ind] = \
-                bw_weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+                (bw_cube[y_ind, x_ind]*weight[y_ind, x_ind])
             
+            weight_cube[z_ind, y_ind, x_ind] = \
+                weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+
+        # Calculate weighted average
+            
+        cube = sum_cube / weight_cube        
+        cube[np.where(weight_cube == 0.0)] = np.nan
+
+        bw_cube = bw_sum_cube / weight_cube
+        bw_cube[np.where(weight_cube == 0.0)] = np.nan
+    
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Output and return
+    # Write to disk
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-    cube = sum_cube / weight_cube
-    cube[np.where(weight_cube == 0.0)] = np.nan
-    
     cube_hdu = fits.PrimaryHDU(cube, target_header)
     if outfile is not None:
         cube_hdu.writeto(outfile, overwrite=overwrite)
@@ -1174,21 +1153,13 @@ def grid_spherex_cube(
         weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
                            , overwrite=overwrite)
         
-    bw_cube = bw_sum_cube / bw_weight_cube
-    bw_cube[np.where(bw_weight_cube == 0.0)] = np.nan
-
     bw_header = target_header.copy()
-    bw_header['BUNIT'] = 'MICRONS'
+    bw_header['BUNIT'] = 'um'
     
     bw_hdu = fits.PrimaryHDU(bw_cube, bw_header)
     if outfile is not None:
         bw_hdu.writeto(outfile.replace('.fits','_bw.fits')
                        , overwrite=overwrite)
-
-    bw_weight_hdu = fits.PrimaryHDU(bw_weight_cube, bw_header)
-    if outfile is not None:
-        bw_weight_hdu.writeto(outfile.replace('.fits','_bwweight.fits')
-                              , overwrite=overwrite)
     
     return(cube_hdu)
 
