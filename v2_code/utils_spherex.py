@@ -937,7 +937,7 @@ def extract_spherex_sed(
 def build_sed_cube(
         target_hdu = None,
         image_list = [],
-        ext_to_use = 'IMAGE',
+        ext_to_use = 'BKSUB',        
         outfile = None,
         overwrite=True):
     """Build cubes of wavelength, bandwidth, and intensity (without any
@@ -1103,6 +1103,9 @@ def grid_spherex_cube(
         sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
         bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
         weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+
+        finite_lam = np.isfinite(lam_cube)
+        finite_val = np.isfinite(int_cube)
         
         for zz in ProgressBar(range(nz)):
 
@@ -1117,7 +1120,7 @@ def grid_spherex_cube(
             # the bandwidth
             
             sed_ind, y_ind, x_ind = \
-                np.where(delta <= 0.5)
+                np.where((delta <= 0.5)*finite_lam*finite_val)
             
             z_ind = np.zeros_like(y_ind,dtype=int)+zz
             
@@ -1130,7 +1133,7 @@ def grid_spherex_cube(
                  bw_cube[sed_ind, y_ind, x_ind]*1.0
             
             weight_cube[z_ind, y_ind, x_ind] = \
-                  weight_cube[sed_ind, y_ind, x_ind] + 1.0
+                  weight_cube[z_ind, y_ind, x_ind] + 1.0
 
         # Calculate weighted average
             

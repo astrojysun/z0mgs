@@ -129,8 +129,7 @@ for this_gal, this_rad in gal_list.items():
         build_sed_cube(
             target_hdu = cube_hdu,
             image_list = im_list,
-            flags_to_use = flags_to_use,
-            ext_to_use = 'IMAGE',
+            ext_to_use = 'BKSUB',
             outfile = gal_dir + this_gal + '_spherex_seds.fits',
             overwrite=True)
     
