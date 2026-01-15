@@ -940,9 +940,9 @@ def build_sed_cube(
     del target_header_2d['CTYPE3']
     del target_header_2d['CUNIT3']
     
-    lam_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    bw_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-    int_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+    lam_cube = np.zeros((nz,ny,nx),dtype=np.float32)*np.nan
+    bw_cube = np.zeros((nz,ny,nx),dtype=np.float32)*np.nan
+    int_cube = np.zeros((nz,ny,nx),dtype=np.float32)*np.nan
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over images
