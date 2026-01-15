@@ -1050,7 +1050,7 @@ def grid_spherex_cube(
         bw_cube = None,
         # Desired wavelength grid
         lam_min = 0.7, lam_max = 5.2, lam_step = 0.02,
-        lam_unit = 'um'
+        lam_unit = 'um',
         # Method
         method = 'TOPHAT',
         outfile = None,
@@ -1073,7 +1073,7 @@ def grid_spherex_cube(
     int_cube = int_hdu.data
     lam_cube = lam_hdu.data
     bw_cube = bw_hdu.data    
-
+    
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Initialize header and output
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1087,12 +1087,12 @@ def grid_spherex_cube(
     nz = len(lam_array)
     target_header['NAXIS'] = 3
     
-    hdu.header['NAXIS3'] = nz
-    hdu.header['CTYPE3'] = 'WAVE'
-    hdu.header['CUNIT3'] = lam_unit
-    hdu.header['CRPIX3'] = 1
-    hdu.header['CRVAL3'] = lam_array[0]
-    hdu.header['CDELT3'] = lam_step
+    target_header['NAXIS3'] = nz
+    target_header['CTYPE3'] = 'WAVE'
+    target_header['CUNIT3'] = lam_unit
+    target_header['CRPIX3'] = 1
+    target_header['CRVAL3'] = lam_array[0]
+    target_header['CDELT3'] = lam_step
 
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Loop over channels or pixels
@@ -1101,13 +1101,13 @@ def grid_spherex_cube(
     if method == 'TOPHAT':
 
         sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-        bw_cube = np.zeros((nz,ny,nx),dtype=np.float32)
-        wt_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+        bw_sum_cube = np.zeros((nz,ny,nx),dtype=np.float32)
+        weight_cube = np.zeros((nz,ny,nx),dtype=np.float32)
         
         for zz in ProgressBar(range(nz)):
 
             this_lam = lam_array[zz]
-
+            
             # Compare the wavelength at each pixel to the center of
             # the current channel in units of bandwidth
             
@@ -1123,14 +1123,14 @@ def grid_spherex_cube(
             
             sum_cube[z_ind, y_ind, x_ind] = \
                 sum_cube[z_ind, y_ind, x_ind] + \
-                (int_cube[y_ind, x_ind]*weight[y_ind, x_ind])
+                int_cube[zz, y_ind, x_ind]*1.0
 
             bw_sum_cube[z_ind, y_ind, x_ind] = \
-                bw_sum_cube[z_ind, y_ind, x_ind] + \
-                (bw_cube[y_ind, x_ind]*weight[y_ind, x_ind])
+                 bw_sum_cube[z_ind, y_ind, x_ind] + \
+                 bw_cube[zz, y_ind, x_ind]*1.0
             
             weight_cube[z_ind, y_ind, x_ind] = \
-                weight_cube[z_ind, y_ind, x_ind] + weight[y_ind, x_ind]
+                  weight_cube[zz, y_ind, x_ind] + 1.0
 
         # Calculate weighted average
             

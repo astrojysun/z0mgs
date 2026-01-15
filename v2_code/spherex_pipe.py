@@ -27,8 +27,8 @@ flags_to_use = \
 
 do_download = False
 do_bksub = False
-do_sed_cube = True
-do_grid = False
+do_sed_cube = False
+do_grid = True
 do_estcont = False
 do_lines = False
 
@@ -140,22 +140,12 @@ for this_gal, this_rad in gal_list.items():
         
     if do_grid:
     
-        cube_hdu = make_cube_header(
-            center_coord = this_gal,
-            #pix_scale = 6. / 3600.,
-            pix_scale = 3. / 3600.,
-            extent = this_rad.to(u.deg).value, 
-            lam_min = 0.75, lam_max = 5.2, lam_step = 0.0075,
-            return_header=False)
-
-        im_list = glob.glob(bksub_dir+'bksub*.fits')
-
         grid_spherex_cube(
-            target_hdu = cube_hdu,
-            image_list = im_list,
-            ext_to_use = 'BKSUB',            
+            int_cube = gal_dir + this_gal + '_spherex_seds.fits',
+            lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075,
+            lam_unit = 'um',            
             outfile = gal_dir + this_gal+'_spherex_cube.fits',
-            flags_to_use = flags_to_use,
+            method = 'TOPHAT',
             overwrite = True)
 
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
