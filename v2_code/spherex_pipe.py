@@ -14,10 +14,10 @@ from astropy.coordinates import SkyCoord
 
 # TBD replace with command line calls.
 
-do_download = False
-do_bksub = False
-do_sed_cube = False
-do_grid = False
+do_download = True
+do_bksub = True
+do_sed_cube = True
+do_grid = True
 do_estcont = True
 do_lines = False
 

@@ -1333,7 +1333,7 @@ def estimate_continuum(
 
             # Fit a spline
             
-            cs = make_smoothing_spline(this_x, this_y, lam=0.01)
+            cs = make_smoothing_spline(this_x, this_y, lam=0.02)
 
             # Predict the values in the cube
 
@@ -1445,7 +1445,9 @@ def spherex_line_image(
     del target_header_2d['CRPIX3']
     del target_header_2d['CTYPE3']
     del target_header_2d['CUNIT3']
-       
+
+    # Pick up here
+    
     sum_image = np.zeros((ny,nx),dtype=np.float32)
     weight_image = np.zeros((ny,nx),dtype=np.float32)
 
