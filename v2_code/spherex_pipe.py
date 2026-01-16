@@ -14,8 +14,8 @@ from astropy.coordinates import SkyCoord
 
 # TBD replace with command line calls.
 
-do_download = True
-do_bksub = True
+do_download = False
+do_bksub = False
 do_sed_cube = True
 do_grid = True
 do_estcont = True
@@ -30,7 +30,7 @@ root_dir = '../../test_data/spherex/'
 
 # Target list table and a list to either restrict to and/or skip
 targ_tab = 'targets_spherex.ecsv'
-just_targs = []
+just_targs = ['evan_cloud']
 skip_targs = []
 
 # Define the flags to apply
@@ -222,7 +222,7 @@ for this_row in targ_tab:
         # cubes of intensity, wavelength, and bandwidth.
         
         cube_hdu = make_cube_header(
-            center_coord = this_gal,
+            center_coord = this_coord,
             pix_scale = 3. / 3600.,
             extent = this_fov.to(u.deg).value, 
             lam_min = 0, lam_max = n_images, lam_step = 1.0,
