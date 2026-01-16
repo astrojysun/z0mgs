@@ -38,7 +38,35 @@ from spectral_cube import SpectralCube
 #warnings.filterwarnings('ignore', category=UserWarning)
 #import astropy.utils.exceptions
 #warnings.simplefilter('ignore', category=astropy.utils.exceptions.AstropyWarning)                     
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Manage targets
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
+def write_template_tab(
+        outfile='example_spherex_targs.ecsv',
+        ):
+
+    coords = SkyCoord.from_name('ngc5194')
+    
+    targ = {
+        'gal':'ngc5194',
+        'ra':coords.ra,
+        'dec':coords.dec,
+        'fov':20.*u.arcmin,
+        'mask_rad':10.*u.arcmin,
+        'mask_pa':0.0*u.deg,
+        'mask_incl':0.0*u.deg,
+        'vrad':463*u.km/u.s,
+        'vwidth':500.*u.km/u.s,
+    }
+
+    tab = Table([targ])
+    tab.write(outfile, overwrite=True, delimiter=',',
+              format='ascii.ecsv')
+
+    return(tab)
+
+        
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routines to query data from IRSA
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
@@ -1049,7 +1077,7 @@ def grid_spherex_cube(
         lam_cube = None,
         bw_cube = None,
         # Desired wavelength grid
-        lam_min = 0.7, lam_max = 5.2, lam_step = 0.02,
+        lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075,
         lam_unit = 'um',
         # Method
         method = 'TOPHAT',
@@ -1121,19 +1149,16 @@ def grid_spherex_cube(
             
             sed_ind, y_ind, x_ind = \
                 np.where((delta <= 0.5)*finite_lam*finite_val)
+
+            val_vec = int_cube[sed_ind, y_ind, x_ind]
+            bw_vec = bw_cube[sed_ind, y_ind, x_ind]
+            wt_vec = val_vec*0.0 + 1.0
             
             z_ind = np.zeros_like(y_ind,dtype=int)+zz
-            
-            sum_cube[z_ind, y_ind, x_ind] = \
-                sum_cube[z_ind, y_ind, x_ind] + \
-                int_cube[sed_ind, y_ind, x_ind]*1.0
 
-            bw_sum_cube[z_ind, y_ind, x_ind] = \
-                 bw_sum_cube[z_ind, y_ind, x_ind] + \
-                 bw_cube[sed_ind, y_ind, x_ind]*1.0
-            
-            weight_cube[z_ind, y_ind, x_ind] = \
-                  weight_cube[z_ind, y_ind, x_ind] + 1.0
+            np.add.at(sum_cube, (z_ind, y_ind, x_ind), val_vec*wt_vec)
+            np.add.at(bw_sum_cube, (z_ind, y_ind, x_ind), bw_vec*wt_vec)
+            np.add.at(weight_cube, (z_ind, y_ind, x_ind), wt_vec)            
 
         # Calculate weighted average
             
@@ -1166,34 +1191,249 @@ def grid_spherex_cube(
     
     return(cube_hdu)
 
+  
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Routine to estimate a smooth continuum
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
+# God this is slow - but it does work nicely. Consult on some
+# speedups.
+
+def estimate_continuum(
+        # Input cubes
+        int_cube = None,
+        lam_cube = None,
+        bw_cube = None,
+        # Desired wavelength grid
+        lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075,
+        lam_unit = 'um',
+        # Features to flag out
+        features_to_flag = [],
+        feature_dict = {},
+        # Redshift
+        vrad = 0.0*u.km/u.s,
+        vwidth = 0.0*u.km/u.s,
+        # Output
+        outfile_cube = None,
+        outfile_seds = None,
+        overwrite=True):
+    """
+    """
+
+    if lam_cube is None:
+        lam_cube = int_cube.replace('.fits','_lam.fits')        
+        
+    if bw_cube is None:
+        bw_cube = int_cube.replace('.fits','_bw.fits')
+
+    int_hdu = fits.open(int_cube)[0]
+    lam_hdu = fits.open(lam_cube)[0]
+    bw_hdu = fits.open(bw_cube)[0]
+
+    int_cube = int_hdu.data
+    lam_cube = lam_hdu.data
+    bw_cube = bw_hdu.data
+
+    nsed, nysed, nxsed = int_cube.shape
+
+    # Doppler shift for source redshift and width
+
+    sol_kms = 2.99792E5*u.km/u.s
+    sol_cgs = 2.99792468E10*u.cm/u.s
+    
+    dopp_fac = \
+        np.sqrt((1.0+vrad/sol_kms)/(1.0-vrad/sol_kms))
+    dopp_fac_high = \
+        np.sqrt((1.0+(vrad+vwidth)/sol_kms)/(1.0-(vrad+vwidth)/sol_kms))
+    dopp_fac_low = \
+        np.sqrt((1.0+(vrad-vwidth)/sol_kms)/(1.0-(vrad-vwidth)/sol_kms))
+    dopp_fac_width = dopp_fac_high - dopp_fac_low
+    
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Flag features
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    for this_feature in features_to_flag:
+
+        if this_feature not in feature_dict:
+            continue
+
+        # Identify where the wavelength of a data point is within half
+        # the bandwidth plus half the feature width of the redshifted
+        # line frequency
+        
+        this_feature_lam = feature_dict[this_feature]['lam']
+        this_feature_width = feature_dict[this_feature]['width']
+        
+        delta = np.abs((this_feature_lam * dopp_fac).to(u.um).value - lam_cube)
+        width = (dopp_fac_width * this_feature_lam).to(u.um).value + \
+            bw_cube * 0.5 + \
+            this_feature_width.to(u.um).value * 0.5
+
+        line_ind = np.where(delta <= width)
+
+        # Blank the intensity here but leave the line width
+        int_cube[line_ind] = np.nan
+        
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Calculate a smooth SED
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    # Initialize the header and output
+
+    # ... one output is on the SED grid
+    sed_header = int_hdu.header.copy()
+
+    # ... the other on a regular grid
+    target_header = int_hdu.header.copy()
+    nx = target_header['NAXIS1']
+    ny = target_header['NAXIS2']
+
+    # Hack to desired new wavelength axis    
+    lam_array = np.arange(lam_min, lam_max + lam_step, lam_step)
+    nz = len(lam_array)
+    target_header['NAXIS'] = 3
+    
+    target_header['NAXIS3'] = nz
+    target_header['CTYPE3'] = 'WAVE'
+    target_header['CUNIT3'] = lam_unit
+    target_header['CRPIX3'] = 1
+    target_header['CRVAL3'] = lam_array[0]
+    target_header['CDELT3'] = lam_step
+
+    # Initialize an output cube
+    cont_sed = np.zeros((nsed, ny, nx), dtype=np.float32)*np.nan
+    cont_cube = np.zeros((nz, ny, nx), dtype=np.float32)*np.nan
+
+    # Loop over the spectra
+    for yy in ProgressBar(range(ny)):
+        for xx in range(nx):
+            
+            # Get this SED
+            this_lam = (lam_cube[:,yy,xx]).flatten()
+            this_spec = (int_cube[:,yy,xx]).flatten()
+            
+            ind = np.where(np.isfinite(this_spec)*np.isfinite(this_lam))
+            this_x = this_lam[ind]
+            this_y = this_spec[ind]
+
+            sort_ind = np.argsort(this_x)
+            this_x = this_x[sort_ind]
+            this_y = this_y[sort_ind]
+
+            # Annoying error catch - the splines want an ascending x
+            # array and sometimes you end up with identical
+            # wavelengths
+            
+            delta_x = this_x - np.roll(this_x,1)
+            delta_x[0] = 1.0
+            keep_ind = np.where(delta_x > 0.0)
+            this_x = this_x[keep_ind]
+            this_y = this_y[keep_ind]
+
+            # Fit a spline
+            
+            cs = make_smoothing_spline(this_x, this_y, lam=0.01)
+
+            # Predict the values in the cube
+
+            pred_y = cs(lam_array)
+
+            # ... avoid extrapolation
+            bad_ind = np.where((lam_array < np.nanmin(this_x)) |
+                               (lam_array > np.nanmax(this_x)))
+            pred_y[bad_ind] = np.nan
+
+            # ... fill in the output
+            cont_cube[:,yy,xx] = pred_y
+
+            # Predict SED values (this_lam is the SED wavelengths)
+
+            pred_sed = cs(this_lam)
+
+            # ... avoid extrapolation
+            bad_ind = np.where((this_lam < np.nanmin(this_x)) |
+                               (this_lam > np.nanmax(this_x)))
+            pred_y[bad_ind] = np.nan
+
+            # ... fill in the output
+            cont_sed[:,yy,xx] = pred_sed
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Write the output
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    cont_cube_hdu = fits.PrimaryHDU(cont_cube, target_header)    
+    cont_sed_hdu = fits.PrimaryHDU(cont_sed, sed_header)
+        
+    if outfile_cube is not None:
+        cont_cube_hdu.writeto(outfile_cube, overwrite=True)
+
+    if outfile_seds is not None:
+        cont_sed_hdu.writeto(outfile_seds, overwrite=True)
+        
+    return((cont_cube_hdu, cont_sed_hdu))
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routine to make a line map
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
 def spherex_line_image(
-        target_hdu = None,
-        central_lam = 1.87,
-        vel_width = 500.,
+        # Input cubes
+        int_cube = None,
+        lam_cube = None,
+        bw_cube = None,
+        # Feature
+        feature_dict = {},
+        feature_to_image = 'bra',
+        # Continuum estimate
+        cont_sed = None,
+        # Source redshift
+        vrad = 0.0*u.km/u.s,
+        vwidth = 0.0*u.km/u.s,
+        # Fraction overlap needed to count image
         frac_thresh = 0.75,
-        image_list = [],
-        continuum = None,
+        # Operation
         operation = 'integrate',
-        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST'],
+        # Output
         outfile = None,
         overwrite = True):
     """
     Grid images into a Spherex line-integrated image.
     """
 
-    sol_kms = 2.99792E5
-    sol_cgs = 2.99792468E10
+    if lam_cube is None:
+        lam_cube = int_cube.replace('.fits','_lam.fits')        
+        
+    if bw_cube is None:
+        bw_cube = int_cube.replace('.fits','_bw.fits')
+
+    int_hdu = fits.open(int_cube)[0]
+    lam_hdu = fits.open(lam_cube)[0]
+    bw_hdu = fits.open(bw_cube)[0]
+
+    int_cube = int_hdu.data
+    lam_cube = lam_hdu.data
+    bw_cube = bw_hdu.data    
+
+    # Doppler shift for source redshift and width
+
+    sol_kms = 2.99792E5*u.km/u.s
+    sol_cgs = 2.99792468E10*u.cm/u.s
+    
+    dopp_fac = \
+        np.sqrt((1.0+vrad/sol_kms)/(1.0-vrad/sol_kms))
+    dopp_fac_high = \
+        np.sqrt((1.0+(vrad+vwidth)/sol_kms)/(1.0-(vrad+vwidth)/sol_kms))
+    dopp_fac_low = \
+        np.sqrt((1.0+(vrad-vwidth)/sol_kms)/(1.0-(vrad-vwidth)/sol_kms))
+    dopp_fac_width = dopp_fac_high - dopp_fac_low
     
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
     # Initialize the output
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-    target_header = target_hdu.header
+    
+    target_header = int_hdu.header.copy()
     nx = target_header['NAXIS1']
     ny = target_header['NAXIS2']
 
@@ -1209,6 +1449,10 @@ def spherex_line_image(
     sum_image = np.zeros((ny,nx),dtype=np.float32)
     weight_image = np.zeros((ny,nx),dtype=np.float32)
 
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Initialize the output
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    
     if continuum is not None:
         cont_hdu_list = fits.open(continuum)
         cont_hdu = cont_hdu_list[0]
@@ -1420,51 +1664,4 @@ def spherex_line_image(
                        , overwrite=overwrite)
     
     return(image_hdu)
-    
-# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
-# Routine to estimate a smooth continuum
-# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
-
-# God this is slow - but it does work nicely. Consult on some
-# speedups.
-
-def estimate_continuum(
-        cube = None,
-        features_to_flag = {},
-        outfile = None,
-        overwrite = True):
-    """
-    """
-
-    # Read the cube
-    sc = SpectralCube.read(cube)
-    vaxis = sc.spectral_axis
-    n_z, n_y, n_x = sc.shape
-
-    # Flag the lines in the cube (fix the broadcasting here later)
-    cube = sc.filled_data[:]
-    for this_lam, this_bw in features_to_flag.items():
-        mask_1d = np.abs(this_lam - vaxis.value) <= 0.5 * this_bw
-        mask_3d = np.broadcast_to(mask_1d[:,np.newaxis,np.newaxis],sc.shape)
-        cube[mask_3d] = np.nan
-    
-    # Loop over the spectra
-    cont_cube = np.zeros((n_z, n_y, n_x), dtype=np.float32)*np.nan
-    for yy in ProgressBar(range(n_y)):
-        for xx in range(n_x):
-            this_spec = (cube[:,yy,xx]).flatten()
-            ind = np.where(np.isfinite(this_spec))
-            this_x = vaxis[ind]
-            this_y = this_spec[ind]
-            cs = make_smoothing_spline(this_x, this_y, lam=0.01)
-            pred_y = cs(vaxis)
-            max_chan = np.max(ind)
-            cont_cube[:max_chan,yy,xx] = pred_y[:max_chan]
-
-    # Write the output
-    cont_hdu = fits.PrimaryHDU(cont_cube, sc.header)
-    if outfile is not None:
-        cont_hdu.writeto(outfile, overwrite=True)
-    return(cont_hdu)
-
             

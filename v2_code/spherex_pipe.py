@@ -3,55 +3,144 @@
 import os, glob
 from utils_spherex import *
 import astropy.units as u
-
-# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
-# Define targets
-# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
-
-# For now use a dictionary of galaxy name and image size. We will
-# expand this eventually.
-
-gal_list = {
-    'ngc5194':20.*u.arcmin,
-}
-
-# Define the flags to use
-
-flags_to_use = \
-    ['SUR_ERROR','NONFUNC','MISSING_DATA',
-     'HOT','COLD','NONLINEAR','PERSIST']
+from astropy.table import Table, QTable
+from astropy.coordinates import SkyCoord
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Set the control flow
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
+# Set which steps to do by toggling these.
+
+# TBD replace with command line calls.
+
 do_download = False
 do_bksub = False
 do_sed_cube = False
-do_grid = True
-do_estcont = False
+do_grid = False
+do_estcont = True
 do_lines = False
+
+# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+# Set parameters
+# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+
+# Root directory
+root_dir = '../../test_data/spherex/'
+
+# Target list table and a list to either restrict to and/or skip
+targ_tab = 'targets_spherex.ecsv'
+just_targs = []
+skip_targs = []
+
+# Define the flags to apply
+flags_to_use = \
+    ['SUR_ERROR','NONFUNC','MISSING_DATA',
+     'HOT','COLD','NONLINEAR','PERSIST']
+
+# Wavelengths of spectral features to flag. This assumes features in
+# the frame of the target galaxy (assuming MW is handled by background
+# subtraction).
+
+features_to_flag = ['pa','pb','bra','brb']
+feature_dict = {}
+feature_dict['pa'] = {'lam':1.87561*u.um, 'width': 0.0*u.um}
+feature_dict['pb'] = {'lam':1.28216*u.um, 'width': 0.0*u.um}
+feature_dict['bra'] = {'lam':4.05226*u.um, 'width': 0.0*u.um}
+feature_dict['brb'] = {'lam':2.62587*u.um, 'width': 0.0*u.um}
+
+# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+# Handle the targets
+# $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+
+# Write a template table (gives an example of what to modify)
+write_template_tab()
+
+# Read the actual table
+targ_tab = QTable.read(targ_tab, format='ascii.ecsv')
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Loop over targets
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
-for this_gal, this_rad in gal_list.items():
+for this_row in targ_tab:
 
-    # Relevant directories
+    if len(just_targs) > 0:
+        if this_row['gal'].strip() not in just_targs:
+            continue
+
+    if len(skip_targs) > 0:
+        if this_row['gal'].strip() in skip_targs:
+            continue
+
+    # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+    # Get parameters for this target
+    # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
+
+    # Set some reasonable defaults and trap missing data.
     
-    root_dir = '../../test_data/spherex/'
+    this_gal = this_row['gal']
+
+    this_ra = this_row['ra']
+    this_dec = this_row['dec']
+
+    if (not np.isfinite(this_ra)) or \
+       (not np.isfinite(this_dec)):
+        this_coord = SkyCoord.from_name(this_gal)
+    else:
+        this_coord = SkyCoord(ra=this_ra, dec=this_dec, frame='icrs')
+
+    this_fov = this_row['fov']
+    if not np.isfinite(this_fov):
+        this_fov = 10.*u.arcmin
+
+    this_mask_rad = this_row['mask_rad']
+    if not np.isfinite(this_mask_rad):
+        this_mask_rad = this_fov
+
+    this_mask_pa = this_row['mask_pa']
+    this_mask_incl = this_row['mask_incl']    
+    if (not np.isfinite(this_mask_pa)) or \
+       (not np.isfinite(this_mask_incl)):
+        this_mask_pa = 0.0*u.deg
+        this_mask_incl = 0.0*u.deg
+
+    this_vrad = this_row['vrad']
+    if not np.isfinite(this_vrad):
+        this_vrat = 0.0*u.km/u.s
+
+    this_vwidth = this_row['vwidth']
+    if not np.isfinite(this_vwidth):
+        this_vwidth = 0.0*u.km/u.s        
+        
+    # Set directories for this target
+    
     gal_dir = root_dir + this_gal + '/'
-    raw_dir = gal_dir + 'raw/'
-    bksub_dir = gal_dir + 'bksub/'
+    raw_ext = 'raw/'
+    bksub_ext = 'bksub/'
+    raw_dir = gal_dir + raw_ext
+    bksub_dir = gal_dir + bksub_ext
     alt_dirs = ['../../test_data/spherex/*/raw/']
 
+    # Print what we're doing
+
+    print("Target: ", this_gal)
+    print("Output directory: ", gal_dir)
+    print("Coords: ", this_coord)
+    print("Field of view: ", this_fov)
+    print("Mask radius, incl, pa: ",
+          this_mask_rad, this_mask_incl, this_mask_pa)
+    
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
     # Download the data
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
     
     if do_download:
 
+        print("")
+        print("Querying the archive and downloading data.")
+        print("")
+        
         # Make the directories if needed
         
         if os.path.isdir(gal_dir) == False:
@@ -64,8 +153,9 @@ for this_gal, this_rad in gal_list.items():
             
         image_tab = \
             search_spherex_images(
-                target = this_gal,
-                radius = this_rad,
+                #target = this_gal,
+                coordinates = this_coord,
+                radius = this_fov,
                 collection = 'spherex_qr2',
                 verbose = True)
 
@@ -85,6 +175,10 @@ for this_gal, this_rad in gal_list.items():
         
     if do_bksub:
 
+        print("")
+        print("Background subtracting and masking the images.")
+        print("")
+        
         # Create the background subtracted directory
         
         if os.path.isdir(bksub_dir) == False:
@@ -99,13 +193,13 @@ for this_gal, this_rad in gal_list.items():
         bksub_im_list = \
             bksub_images(
                 image_list = lvl2_im_list,
-                indir_ext = 'raw/',
-                outdir_ext = 'bksub/',
+                indir_ext = raw_ext,
+                outdir_ext = bksub_ext,
                 sub_zodi = True,
-                gal_coord = None,
-                gal_rad_deg = 10./60.,
-                gal_incl = 0.0,
-                gal_pa = 0.0,
+                gal_coord = this_coord,
+                gal_rad_deg = this_mask_rad.to(u.deg).value,
+                gal_incl = this_mask_incl.to(u.deg).value,
+                gal_pa = this_mask_pa.to(u.deg).value,
                 frac_bw_step = 0.5,
             )
 
@@ -114,15 +208,23 @@ for this_gal, this_rad in gal_list.items():
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
 
     if do_sed_cube:
-    
+
+        print("")
+        print("Building irregular-sampling SED+lam+bw cubes.")
+        print("")
+
         im_list = glob.glob(bksub_dir+'bksub*.fits')
         n_images = len(im_list)
 
+        # Make a header that has our desired astrometry and a
+        # wavelength axis that is just equal to the number of
+        # images. The images are reprojected and loaded in to form
+        # cubes of intensity, wavelength, and bandwidth.
+        
         cube_hdu = make_cube_header(
             center_coord = this_gal,
-            #pix_scale = 6. / 3600.,
             pix_scale = 3. / 3600.,
-            extent = this_rad.to(u.deg).value, 
+            extent = this_fov.to(u.deg).value, 
             lam_min = 0, lam_max = n_images, lam_step = 1.0,
             return_header=False)
 
@@ -134,11 +236,14 @@ for this_gal, this_rad in gal_list.items():
             overwrite=True)
     
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
-    # Grid into a cube
+    # Grid into a cube with regular wavelength
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
         
     if do_grid:
-    
+
+        # Grid the SED cubes into cubes regularly spaced in
+        # wavelength.
+        
         grid_spherex_cube(
             int_cube = gal_dir + this_gal + '_spherex_seds.fits',
             lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075,
@@ -154,12 +259,13 @@ for this_gal, this_rad in gal_list.items():
     if do_estcont:
 
         estimate_continuum(
-            cube = gal_dir + this_gal+'_spherex_cube.fits',
-            features_to_flag = {
-                1.875:0.04,
-                4.052:0.04,
-            },
-            outfile = gal_dir + this_gal+'_spherex_smooth.fits',
+            int_cube = gal_dir + this_gal + '_spherex_seds.fits',
+            lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075, lam_unit = 'um',
+            features_to_flag = features_to_flag,
+            feature_dict = feature_dict,
+            vrad = this_vrad, vwidth = this_vwidth,
+            outfile_cube = gal_dir + this_gal+'_spherex_cube_smooth.fits',
+            outfile_seds = gal_dir + this_gal+'_spherex_sed_smooth.fits',            
             overwrite=True)
     
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
