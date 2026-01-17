@@ -529,76 +529,6 @@ def make_cube_header(
     else:
         return(hdu)
 
-# Potentially useful but interface with numpy is not straightforward.
-
-class SpherexFlag(IntFlag):
-    TRANSIENT = auto()
-    OVERFLOW = auto()
-    SUR_ERROR = auto()
-    BLANK_1 = auto()
-    PHANTOM = auto()
-    REFERENCE = auto()
-    NONFUNC = auto()
-    DICHROIC = auto()
-    BLANK_2 = auto()
-    MISSING_DATA = auto()
-    HOT = auto()
-    COLD = auto()    
-    FULLSAMPLE = auto()
-    BLANK_3 = auto()
-    PHANMISS = auto()
-    NONLINEAR = auto()
-    BLANK_4 = auto()    
-    PERSIST = auto()
-    BLANK_5 = auto()        
-    OUTLIER = auto()
-    BLANK_6 = auto()        
-    SOURCE = auto()
-
-def spherex_flag_dict():
-    """
-    """
-
-    # From the header, flag definitions
-    
-    #HIERARCH MP_TRANSIENT = 0 / Transient detected during SUR                       
-    #HIERARCH MP_OVERFLOW = 1 / Overflow detected during SUR                         
-    #HIERARCH MP_SUR_ERROR = 2 / Error in onboard processing                         
-    #HIERARCH MP_PHANTOM = 4 / Phantom pixel                                         
-    #HIERARCH MP_REFERENCE = 5 / Reference pixel                                     
-    #HIERARCH MP_NONFUNC = 6 / Permanently unusable                                  
-    #HIERARCH MP_DICHROIC = 7 / Low efficiency due to dichroic                       
-    #HIERARCH MP_MISSING_DATA = 9 / Onboard data lost                                
-    #MP_HOT  =                   10 / Hot pixel                                      
-    #MP_COLD =                   11 / Anomalously low signal                         
-    #HIERARCH MP_FULLSAMPLE = 12 / Pixel full sample history is available            
-    #HIERARCH MP_PHANMISS = 14 / Phantom correction was not applied                  
-    #HIERARCH MP_NONLINEAR = 15 / Nonlinearity correction cannot be applied reliably 
-    #HIERARCH MP_PERSIST = 17 / Persistent charge above threshold                    
-    #HIERARCH MP_OUTLIER = 19 / Pixel flagged by Detect Outliers                     
-    #HIERARCH MP_SOURCE = 21 / Pixel mapped to a known source    
-    
-    this_dict = {
-        'TRANSIENT' : 0,
-        'OVERFLOW' : 1,
-        'SUR_ERROR' : 2,
-        'PHANTOM' : 4,
-        'REFERENCE' : 5,
-        'NONFUNC' : 6,
-        'DICHROIC' : 7,
-        'MISSING_DATA' : 9,
-        'HOT' : 10,
-        'COLD' : 11,
-        'FULLSAMPLE' : 12,
-        'PHANMISS' : 14,
-        'NONLINEAR' : 15,
-        'PERSIST' : 17,
-        'OUTLIER' : 19,
-        'SOURCE' : 21,        
-    }
-    
-    return(this_dict)
-
 def estimate_spherex_bkgrd(
         image = None,
         header = None,
@@ -782,79 +712,102 @@ def bksub_images(
     return(bksub_image_list)
 
 
+def spherex_flag_dict():
+    """
+    """
+    # From the header, flag definitions
+    
+    #HIERARCH MP_TRANSIENT = 0 / Transient detected during SUR                       
+    #HIERARCH MP_OVERFLOW = 1 / Overflow detected during SUR                         
+    #HIERARCH MP_SUR_ERROR = 2 / Error in onboard processing                         
+    #HIERARCH MP_PHANTOM = 4 / Phantom pixel                                         
+    #HIERARCH MP_REFERENCE = 5 / Reference pixel                                     
+    #HIERARCH MP_NONFUNC = 6 / Permanently unusable                                  
+    #HIERARCH MP_DICHROIC = 7 / Low efficiency due to dichroic                       
+    #HIERARCH MP_MISSING_DATA = 9 / Onboard data lost                                
+    #MP_HOT  =                   10 / Hot pixel                                      
+    #MP_COLD =                   11 / Anomalously low signal                         
+    #HIERARCH MP_FULLSAMPLE = 12 / Pixel full sample history is available            
+    #HIERARCH MP_PHANMISS = 14 / Phantom correction was not applied                  
+    #HIERARCH MP_NONLINEAR = 15 / Nonlinearity correction cannot be applied reliably 
+    #HIERARCH MP_PERSIST = 17 / Persistent charge above threshold                    
+    #HIERARCH MP_OUTLIER = 19 / Pixel flagged by Detect Outliers                     
+    #HIERARCH MP_SOURCE = 21 / Pixel mapped to a known source    
+    
+    this_dict = {
+        'TRANSIENT' : 0,
+        'OVERFLOW' : 1,
+        'SUR_ERROR' : 2,
+        'PHANTOM' : 4,
+        'REFERENCE' : 5,
+        'NONFUNC' : 6,
+        'DICHROIC' : 7,
+        'MISSING_DATA' : 9,
+        'HOT' : 10,
+        'COLD' : 11,
+        'FULLSAMPLE' : 12,
+        'PHANMISS' : 14,
+        'NONLINEAR' : 15,
+        'PERSIST' : 17,
+        'OUTLIER' : 19,
+        'SOURCE' : 21,        
+    }
+    
+    return(this_dict)
+
+
 def make_mask_from_flags(
         flag_image,
-        flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                        'HOT','COLD','NONLINEAR','PERSIST'],        
-):
+        flags_to_use = [
+            'SUR_ERROR', 'NONFUNC', 'MISSING_DATA',
+            'HOT', 'COLD', 'NONLINEAR', 'PERSIST'],
+        ):
     """Given a list of flag names to use construct a mask from the input
     flag image. The flag image is a bitmask, and the mapping between
     flags and bits is defined in the explanatory supplement and coded
     into a dictionary above.
 
-    THIS COULD ALL USE CHECKING!!!
+    Parameters
+    ----------
+    flag_image : array
+        Input flag image where each pixel value is a bitmask
+    flags_to_use : list of str
+        List of flag names to include in the mask
+        
+    Returns
+    -------
+    mask : bool array
+        Boolean mask where True indicates flagged pixels
 
+    Notes
+    -----
+    Suggested flags for background estimation masking:
+        OVERFLOW, SUR_ERROR, NONFUNC, MISSING_DATA, HOT, COLD, 
+        NONLINEAR, PERSIST, OUTLIER, SOURCE, TRANSIENT
+
+    Suggested flags for on-source photometry:
+        SUR_ERROR, NONFUNC, MISSING_DATA, HOT, COLD, NONLINEAR, PERSIST
     """
 
-    # From the explanatory supplement
-
-    # Suggested flags for background estimation masking:
-
-    # OVERFLOW
-    # SUR_ERROR
-    # NONFUNC
-    # MISSING_DATA
-    # HOT
-    # COLD
-    # NONLINEAR
-    # PERSIST
-    # OUTLIER
-    # SOURCE
-    # TRANSIENT
-
-    # Suggested flags for on source photometry:
-
-    # SUR_ERROR
-    # NONFUNC
-    # MISSING_DATA
-    # HOT
-    # COLD
-    # NONLINEAR
-    # PERSIST
-
-    use_flag_ind = []
+    # Get bit positions for requested flags
     flag_dict = spherex_flag_dict()
+
+    # Combine requested flags into a single bitmask
+    combined_bitmask = 0
     for this_flag in flags_to_use:
         try:
-            this_ind = flag_dict[this_flag.upper()]
+            bit_position = flag_dict[this_flag.upper()]
+            # OR together the bit values (2^bit_position)
+            combined_bitmask |= (1 << bit_position)
         except KeyError:
-            print("Flag unrecognized: ", this_flag)
+            print(f"Warning: Flag '{this_flag}' not recognized -- ignore")
             continue
-        use_flag_ind.append(this_ind)
     
-    n_flags = 22
-
-    # Make an array of powers of 2 to cover each relevant bit
-    powers_of_2 = 1 << np.arange(n_flags)
-
-    # Copy the flag image to AND against each flag
-    flag_cube = np.repeat(flag_image[:,:,np.newaxis], n_flags, axis=2)
+    # Single bitwise AND to check all requested flags at once
+    mask = (flag_image & combined_bitmask) != 0
     
-    # Use bitwise AND to hash against each flag
-    mask_cube = (flag_cube & powers_of_2) != 0
-    
-    # Initialize the image mask
-    mask = np.zeros_like(flag_image, dtype=bool)
+    return mask
 
-    # Loop over and accumulate the requested flags
-    for ii in np.arange(n_flags):
-
-        if ii not in use_flag_ind:
-            continue
-
-        mask = mask | (mask_cube[:,:,ii])
-        
-    return(mask)
 
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routine to extract an SED
