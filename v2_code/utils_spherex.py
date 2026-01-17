@@ -1354,7 +1354,7 @@ def estimate_continuum(
             # ... avoid extrapolation
             bad_ind = np.where((this_lam < np.nanmin(this_x)) |
                                (this_lam > np.nanmax(this_x)))
-            pred_y[bad_ind] = np.nan
+            pred_sed[bad_ind] = np.nan
 
             # ... fill in the output
             cont_sed[:,yy,xx] = pred_sed
@@ -1378,292 +1378,136 @@ def estimate_continuum(
 # Routine to make a line map
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
-def spherex_line_image(
+def make_spherex_line_image(
         # Input cubes
         int_cube = None,
+        cont_cube = None,
         lam_cube = None,
         bw_cube = None,
         # Feature
         feature_dict = {},
-        feature_to_image = 'bra',
-        # Continuum estimate
-        cont_sed = None,
         # Source redshift
         vrad = 0.0*u.km/u.s,
-        vwidth = 0.0*u.km/u.s,
-        # Fraction overlap needed to count image
-        frac_thresh = 0.75,
-        # Operation
-        operation = 'integrate',
+        #vwidth = 0.0*u.km/u.s,  # Not used yet
+        # Assumed LSF shape
+        lsf = 'tophat',
         # Output
         outfile = None,
         overwrite = True):
     """
-    Grid images into a Spherex line-integrated image.
+    Create a line-integrated image.
     """
 
     if lam_cube is None:
-        lam_cube = int_cube.replace('.fits','_lam.fits')        
+        lam_cube = str(int_cube).replace('.fits', '_lam.fits')        
         
     if bw_cube is None:
-        bw_cube = int_cube.replace('.fits','_bw.fits')
+        bw_cube = str(int_cube).replace('.fits', '_bw.fits')
 
-    int_hdu = fits.open(int_cube)[0]
-    lam_hdu = fits.open(lam_cube)[0]
-    bw_hdu = fits.open(bw_cube)[0]
+    # calculate line center wavelength (assuming 0 width for now)
+    line_lam_rest = feature_dict['lam']
+    line_lam_obs = line_lam_rest * (1 + (vrad / const.c).to('').value)
 
-    int_cube = int_hdu.data
-    lam_cube = lam_hdu.data
-    bw_cube = bw_hdu.data    
+    # zoom in on relevant data by sorting and selecting nearest channels (vectorized)
+    # First, load only wavelength cube to determine sorting order
+    with fits.open(lam_cube) as hdul:
 
-    # Doppler shift for source redshift and width
-
-    sol_kms = 2.99792E5*u.km/u.s
-    sol_cgs = 2.99792468E10*u.cm/u.s
+        hdr = hdul[0].header.copy()
+        u_lam = u.Unit(hdul[0].header['BUNIT'])
+        lam_full = hdul[0].data * u_lam
+        
+        # Calculate wavelength distance from line for all pixels
+        abs_delta_lam_full = np.abs(lam_full - line_lam_obs)
+        
+        # Get dimensions
+        nz_full, ny, nx = lam_full.shape
+        n_channels = 20  # number of nearest channels to keep
+        
+        # Sort along spectral axis (axis=0) - argsort returns indices
+        sort_idx = np.argsort(abs_delta_lam_full.value, axis=0)[:n_channels, :, :]
+        
+        # Use take_along_axis for cleaner indexing
+        abs_delta_lam = np.take_along_axis(abs_delta_lam_full.value, sort_idx, axis=0) * u_lam
+        
+        # Clean up large arrays
+        del lam_full, abs_delta_lam_full
     
-    dopp_fac = \
-        np.sqrt((1.0+vrad/sol_kms)/(1.0-vrad/sol_kms))
-    dopp_fac_high = \
-        np.sqrt((1.0+(vrad+vwidth)/sol_kms)/(1.0-(vrad+vwidth)/sol_kms))
-    dopp_fac_low = \
-        np.sqrt((1.0+(vrad-vwidth)/sol_kms)/(1.0-(vrad-vwidth)/sol_kms))
-    dopp_fac_width = dopp_fac_high - dopp_fac_low
+    # Now load and subselect each cube separately to limit memory
+    with fits.open(int_cube) as hdul:
+        u_int = u.Unit(hdul[0].header['BUNIT'])
+        int_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_int
     
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Initialize the output
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    with fits.open(bw_cube) as hdul:
+        u_bw = u.Unit(hdul[0].header['BUNIT'])
+        bw_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_bw
     
-    target_header = int_hdu.header.copy()
-    nx = target_header['NAXIS1']
-    ny = target_header['NAXIS2']
-
-    target_header_2d = target_header.copy()
-    target_header_2d['NAXIS'] = 2
-    del target_header_2d['NAXIS3']
-    del target_header_2d['CRVAL3']
-    del target_header_2d['CDELT3']
-    del target_header_2d['CRPIX3']
-    del target_header_2d['CTYPE3']
-    del target_header_2d['CUNIT3']
-
-    # Pick up here
+    with fits.open(cont_cube) as hdul:
+        cont_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_int
     
-    sum_image = np.zeros((ny,nx),dtype=np.float32)
-    weight_image = np.zeros((ny,nx),dtype=np.float32)
+    # subtract continuum
+    line_data = int_data - cont_data
 
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Initialize the output
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # find bandwidth in the closest channel to the line along each sightline
+    bw_line_lam = np.take_along_axis(
+        bw_data, abs_delta_lam.argmin(axis=0)[np.newaxis, :, :], axis=0)[0, :, :]
+
+    # integrate according to LSF
+    if lsf == 'tophat':
+
+        # average over all data points where line falls within the tophat LSF
+        lsf_mask = (abs_delta_lam <= (0.5 * bw_line_lam)) & np.isfinite(line_data)
+        line_image = (
+            np.nansum(line_data * lsf_mask, axis=0) /
+            np.nansum(lsf_mask, axis=0))
+        
+        # convert unit
+        bw_line_nu = (
+            bw_line_lam * const.c / line_lam_obs**2).to('Hz')
+        line_image *= bw_line_nu
+        
+    elif lsf == 'gaussian':
+
+        # calculate sigma in wavelength units
+        sigma_lam = bw_line_lam / np.sqrt(8 * np.log(2))
+
+        # find all data points within 2 sigma of the line center
+        lsf_mask = (
+            (abs_delta_lam <= (2.0 * sigma_lam)) & np.isfinite(line_data))
+
+        # calculate Gaussian LSF response for all data points
+        lsf_curve = (
+            np.exp(-0.5 * (abs_delta_lam / sigma_lam)**2) /
+            np.sqrt(2 * np.pi * sigma_lam**2)).to('um-1')
+
+        # weighted average over relevant data points
+        # (assuming uniform noise on all data points, and weight = 1/noise^2)
+        line_image = (
+            np.nansum(line_data * lsf_curve * lsf_mask, axis=0) /
+            np.nansum(lsf_curve**2 * lsf_mask, axis=0))
+
+        # convert unit
+        line_image *= const.c / line_lam_obs**2
+        
+    else:
+
+        raise ValueError(
+            f"LSF {lsf} not recognized. Use 'tophat' or 'gaussian'.")
     
-    if continuum is not None:
-        cont_hdu_list = fits.open(continuum)
-        cont_hdu = cont_hdu_list[0]
+    # prepare header
+    hdr_2d = hdr.copy()
+    hdr_2d['NAXIS'] = 2
+    del hdr_2d['NAXIS3']
+    del hdr_2d['CRVAL3']
+    del hdr_2d['CDELT3']
+    del hdr_2d['CRPIX3']
+    del hdr_2d['CTYPE3']
+    del hdr_2d['CUNIT3']
+    hdr_2d['BUNIT'] = 'erg s-1 cm-2 sr-1'
+    line_image = line_image.to('erg s-1 cm-2 sr-1').value
+    image_hdu = fits.PrimaryHDU(line_image, hdr_2d)
 
-        missing = np.nan
-        reprojected_cont, footprint_cont = \
-            reproject_interp(cont_hdu, target_header_2d, order='bilinear')
-        reprojected_cont[footprint_cont == 0] = missing
-    
-    min_lam = central_lam - vel_width/sol_kms*central_lam*0.5
-    max_lam = central_lam + vel_width/sol_kms*central_lam*0.5
-
-    # Initialize
-
-    sum_image = np.zeros((ny,nx),dtype=np.float32)
-    weight_image = np.zeros((ny,nx),dtype=np.float32)
-
-    bkgrd_sum_image = np.zeros((ny,nx),dtype=np.float32)
-    bkgrd_weight_image = np.zeros((ny,nx),dtype=np.float32)
-    
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Loop over the image list
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-    for this_fname in ProgressBar(image_list):        
-        
-        this_hdu_list = fits.open(this_fname)
-        hdu_image = this_hdu_list['IMAGE']
-        hdu_flags = this_hdu_list['FLAGS']
-        hdu_zodi = this_hdu_list['ZODI']        
-        image_header = hdu_image.header
-        
-        lam, bw = make_wavelength_image(
-            hdu_list = this_hdu_list,
-            use_hdu = 'IMAGE',
-        )
-
-        this_max_lam = (np.nanmax(lam + bw)).value
-        this_min_lam = (np.nanmin(lam - bw)).value
-        
-        if (this_max_lam < min_lam):
-            continue
-
-        if (this_min_lam > max_lam):
-            continue
-        
-        hdu_lam = fits.PrimaryHDU(lam, image_header)
-        hdu_bw = fits.PrimaryHDU(bw, image_header)
-
-        # Implement flags and subtract ZODI if requested
-
-        mask = make_mask_from_flags(
-            hdu_flags.data,
-            flags_to_use = flags_to_use,
-        )
-
-        if sub_zodi:
-            masked_data = hdu_image.data - hdu_zodi.data
-        else:
-            masked_data = hdu_image.data
-            
-        masked_data[mask] = np.nan
-
-        # Fit a background (or leave it at 0.0)
-        if sub_bkgrd:
-            bkgrd = estimate_spherex_bkgrd(
-                image = masked_data,
-                header = image_header,
-                lam = lam,
-                bw = bw,
-                gal_coord = gal_coord,
-                gal_rad_deg = gal_rad_deg,
-                gal_incl = gal_incl,
-                gal_pa = gal_pa,
-            )
-        else:
-            bkgrd = np.zeros_like(masked_data)
-
-        masked_data -= bkgrd
-        hdu_masked_image = fits.PrimaryHDU(masked_data, image_header)
-        hdu_bkgrd_image = fits.PrimaryHDU(bkgrd, image_header)
-
-        # This is pretty annoyingly inefficient to repeat three
-        # reprojects, but for now it is what it is. Reproject image,
-        # wavelength, and bandwidth to the target header.
-        
-        missing = np.nan
-        
-        reprojected_image, footprint_image = \
-            reproject_interp(hdu_masked_image, target_header_2d, order='bilinear')
-        reprojected_image[footprint_image == 0] = missing
-
-        reprojected_lam, footprint_lam = \
-            reproject_interp(hdu_lam, target_header_2d, order='bilinear')
-        reprojected_lam[footprint_lam == 0] = missing
-
-        reprojected_bw, footprint_bw = \
-            reproject_interp(hdu_bw, target_header_2d, order='bilinear')
-        reprojected_bw[footprint_bw == 0] = missing        
-
-        reprojected_bkgrd, footprint_bkgrd = \
-            reproject_interp(hdu_bkgrd_image, target_header_2d, order='bilinear')
-        reprojected_bkgrd[footprint_bkgrd == 0] = missing        
-
-        weight = np.isfinite(reprojected_image)*1.0
-        
-        # Identify overlap
-
-        if continuum is not None:
-            
-            reprojected_image = reprojected_image - reprojected_cont
-
-        # Identify relevant pixels
-
-        # ... lower and upper end of the bandpass for each pixel
-        low_lam = reprojected_lam - 0.5*reprojected_bw                
-        hi_lam = reprojected_lam + 0.5*reprojected_bw
-
-        # ... identify where overlap with the line starts
-        # pixel-by-pixel
-        
-        start_im = low_lam
-        start_im[np.where(min_lam > start_im)] = min_lam
-
-        # ... identify where overlap with the line stars
-        # pixel-by-pixel
-        
-        stop_im = hi_lam
-        stop_im[np.where(max_lam < stop_im)] = max_lam
-
-        # ... fraction of overlap with the full line
-        
-        overlap_im = (stop_im-start_im)/(max_lam - min_lam)
-
-        # ... find where the filter overlaps the line above the
-        # threshold
-        
-        y_ind, x_ind = \
-            np.where(overlap_im >= frac_thresh)
-        
-        # Convert to line integral
-
-        if operation.lower() == 'integrate':
-
-            hi_freq = sol_cgs/(low_lam*1E-4)
-            low_freq = sol_cgs/(hi_lam*1E-4)
-
-            bw_freq = hi_freq-low_freq
-
-            # Starts in MJy/sr then convert to cgs (so erg/s/cm2/Hz)
-            # then multiply by bandwidth in Hz
-            
-            reprojected_image = \
-                reprojected_image * 1E6 * \
-                1E-23 * bw_freq
-
-            target_header_2d['BUNIT'] = 'erg/s/cm**2/sr'
-            
-        if operation.lower() == 'average':
-
-            # Stay in MJy/sr
-            pass
-        
-        sum_image[y_ind, x_ind] = \
-            sum_image[y_ind, x_ind] + \
-            (reprojected_image[y_ind, x_ind]*weight[y_ind, x_ind])
-
-        weight_image[y_ind, x_ind] = \
-            weight_image[y_ind, x_ind] + \
-            (weight[y_ind, x_ind])        
-
-        bkgrd_sum_image[y_ind, x_ind] = \
-            bkgrd_sum_image[y_ind, x_ind] + \
-            (reprojected_bkgrd[y_ind, x_ind]*weight[y_ind, x_ind])
-        
-        bkgrd_weight_image[y_ind, x_ind] = \
-            bkgrd_weight_image[y_ind, x_ind] + weight[y_ind, x_ind]
-
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-    # Output and return
-    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-    image = sum_image / weight_image
-    image[np.where(weight_image == 0.0)] = np.nan
-
-    image_hdu = fits.PrimaryHDU(image, target_header_2d)
+    # write to file
     if outfile is not None:
         image_hdu.writeto(outfile, overwrite=overwrite)
-        
-    weight_hdu = fits.PrimaryHDU(weight_image, target_header_2d)
-    if outfile is not None:
-        weight_hdu.writeto(outfile.replace('.fits','_weight.fits')
-                           , overwrite=overwrite)
 
-    bkgrd_image = bkgrd_sum_image / bkgrd_weight_image
-    bkgrd_image[np.where(bkgrd_weight_image == 0.0)] = np.nan
-
-    bkgrd_header = target_header.copy()
-    bkgrd_header['BUNIT'] = 'MJy/sr'
-
-    bkgrd_hdu = fits.PrimaryHDU(bkgrd_image, bkgrd_header)
-    if outfile is not None:
-        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrd.fits')
-                       , overwrite=overwrite)
-
-    bkgrd_weight_hdu = fits.PrimaryHDU(bkgrd_weight_image, bkgrd_header)
-    if outfile is not None:
-        bkgrd_hdu.writeto(outfile.replace('.fits','_bkgrdweight.fits')
-                       , overwrite=overwrite)
-    
-    return(image_hdu)
-            
+    return image_hdu
