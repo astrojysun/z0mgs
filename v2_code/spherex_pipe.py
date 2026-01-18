@@ -19,7 +19,7 @@ do_bksub = False
 do_sed_cube = True
 do_grid = True
 do_estcont = True
-do_lines = False
+do_lines = True
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Set parameters
@@ -257,16 +257,17 @@ for this_row in targ_tab:
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
     if do_estcont:
-
-        estimate_continuum(
+    
+        estimate_continuum_fls(
             int_cube = gal_dir + this_gal + '_spherex_seds.fits',
-            lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075, lam_unit = 'um',
             features_to_flag = features_to_flag,
             feature_dict = feature_dict,
             vrad = this_vrad, vwidth = this_vwidth,
+            lam_min = 0.7, lam_max = 5.2, lam_step = 0.0075, lam_unit = 'um',
+            # filter_width = 0.3*u.um, bandwidth_fraction = 0.1,
             outfile_cube = gal_dir + this_gal+'_spherex_cube_smooth.fits',
-            outfile_seds = gal_dir + this_gal+'_spherex_sed_smooth.fits',            
-            overwrite=True)
+            outfile_seds = gal_dir + this_gal+'_spherex_sed_smooth.fits',
+            overwrite=True, verbose=True)
     
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
     # Make line images
