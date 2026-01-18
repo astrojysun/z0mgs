@@ -1691,7 +1691,7 @@ def estimate_continuum_fls(
         show_progress=verbose)
     
     # assign weights and handle NaNs
-    weights = np.isfinite(int_data).astype(float)
+    weights = np.isfinite(int_data).astype(np.float32)
     weights /= noise_std[None, :]**2
     int_data[np.isnan(int_data)] = 0.0
     lam_data[np.isnan(lam_data)] = 0.0
@@ -1722,7 +1722,7 @@ def estimate_continuum_fls(
         # reshape to cube
         cont_sed = cont_sed.reshape((nlam, ny, nx))
         # write to file
-        cont_sed_hdu = fits.PrimaryHDU(cont_sed, hdr)
+        cont_sed_hdu = fits.PrimaryHDU(cont_sed.astype(np.float32), hdr)
         cont_sed_hdu.writeto(outfile_seds, overwrite=overwrite)
 
     if outfile_cube is not None:
@@ -1740,7 +1740,7 @@ def estimate_continuum_fls(
         # evaluate model
         cont_cube = fls_model(lam_out).reshape((len(lam_out), ny, nx))
         # write to file
-        cont_cube_hdu = fits.PrimaryHDU(cont_cube, hdr)
+        cont_cube_hdu = fits.PrimaryHDU(cont_cube.astype(np.float32), hdr)
         cont_cube_hdu.writeto(outfile_cube, overwrite=overwrite)
 
     return fls_model
