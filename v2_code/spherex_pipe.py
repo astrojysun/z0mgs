@@ -274,17 +274,19 @@ for this_row in targ_tab:
 
     if do_lines:
         
-        spherex_line_image(
-            target_hdu = None,
-            central_lam = 1.87,
-            vel_width = 500.,
-            frac_thresh = 0.75,
-            image_list = [],
-            continuum = None,
-            operation = 'integrate',
-            flags_to_use = ['SUR_ERROR','NONFUNC','MISSING_DATA',
-                            'HOT','COLD','NONLINEAR','PERSIST'],
-            outfile = None,
+        make_spherex_line_image(
+            int_cube = gal_dir + this_gal + '_spherex_seds.fits',
+            cont_cube = gal_dir + this_gal + '_spherex_seds_smooth.fits'
+            feature_dict = feature_dict['bra'],
+            vrad=this_vrad, lsf='tophat',
+            outfile=gal_dir + this_gal + '_spherex_line_bra_tophat.fits',
             overwrite = True)
         
-    
+        make_spherex_line_image(
+            int_cube = gal_dir + this_gal + '_spherex_seds.fits',
+            cont_cube = gal_dir + this_gal + '_spherex_seds_smooth.fits'
+            feature_dict = feature_dict['bra'],
+            vrad=this_vrad, lsf='gaussian',
+            outfile=gal_dir + this_gal + '_spherex_line_bra_gaussian.fits',
+            overwrite = True)
+        
