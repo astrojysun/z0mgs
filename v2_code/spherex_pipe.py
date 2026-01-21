@@ -173,9 +173,11 @@ for this_row in targ_tab:
 
         # Download or check for existence of images
 
-        downloaded_images = download_images(
-            image_tab, outdir=str(raw_dir)+'/', alt_dirs=alt_dirs,
-            incremental=True, verbose=True)
+        for i in range(2):
+            print(f"\n=====\nTry {i+1}\n=====\n")
+            downloaded_images = download_images(
+                image_tab, outdir=str(raw_dir)+'/', alt_dirs=alt_dirs,
+                incremental=True, verbose=True)
 
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
     # Background subtract the raw images
