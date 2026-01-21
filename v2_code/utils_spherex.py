@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import os, glob, sys
+import os, glob
 import numpy as np
 import warnings
 
@@ -13,19 +13,14 @@ from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import pixel_to_skycoord
-from astropy.nddata import Cutout2D
 from astropy.table import Table, QTable
 from astropy import units as u, constants as const
-from astropy.stats import sigma_clipped_stats
 
 # Astroquery for IRSA access
 from astroquery.ipac.irsa import Irsa
 
 # Reproject for image alignment
 from reproject import reproject_interp
-from reproject.mosaicking import find_optimal_celestial_wcs
-
-from astropy.utils.console import ProgressBar
 
 # Used to analyze the cube
 from numpy import linalg
@@ -802,7 +797,7 @@ def bksub_images(
 
     bksub_image_list = []
     
-    for this_fname in ProgressBar(image_list):
+    for this_fname in tqdm(image_list):
 
         this_hdu_list = fits.open(this_fname)
 
@@ -1027,7 +1022,7 @@ def extract_spherex_sed(
     
     counter = 0
     
-    for this_fname in ProgressBar(image_list):        
+    for this_fname in tqdm(image_list):        
         
         this_hdu_list = fits.open(this_fname)
         hdu_image = this_hdu_list['IMAGE']
@@ -1122,7 +1117,7 @@ def build_sed_cube(
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
     zz = 0
-    for this_fname in ProgressBar(image_list):   
+    for this_fname in tqdm(image_list):   
 
         # Open this file
         
@@ -1257,7 +1252,7 @@ def grid_spherex_cube(
         finite_lam = np.isfinite(lam_cube)
         finite_val = np.isfinite(int_cube)
         
-        for zz in ProgressBar(range(nz)):
+        for zz in tqdm(range(nz)):
 
             this_lam = lam_array[zz]
             
@@ -1426,7 +1421,7 @@ def estimate_continuum(
     cont_cube = np.zeros((nz, ny, nx), dtype=np.float32)*np.nan
 
     # Loop over the spectra
-    for yy in ProgressBar(range(ny)):
+    for yy in tqdm(range(ny)):
         for xx in range(nx):
             
             # Get this SED
