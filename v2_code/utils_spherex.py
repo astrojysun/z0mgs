@@ -30,6 +30,7 @@ from astropy.utils.console import ProgressBar
 # Used to analyze the cube
 from numpy import linalg
 from scipy.interpolate import make_smoothing_spline
+from spectral_cube import SpectralCube
 
 #import warnings
 #warnings.filterwarnings('ignore', category=UserWarning)
@@ -1690,7 +1691,7 @@ def estimate_continuum_fls(
         vrad = 0.0*u.km/u.s,
         vwidth = 0.0*u.km/u.s,
         # Width of median filter
-        filter_width = 0.3*u.um,
+        filter_width = None,
         # Desired wavelength grid
         lam_min = 0.7,
         lam_max = 5.2,
@@ -1701,7 +1702,7 @@ def estimate_continuum_fls(
         outfile_cube = None,
         overwrite=True,
         # arguments for FLS
-        bandwidth_fraction=0.1,
+        bandwidth_fraction=0.15,
         verbose=True,
         **kwargs):
     """
@@ -1728,8 +1729,8 @@ def estimate_continuum_fls(
         Radial velocity of the target
     vwidth : Quantity
         Velocity width of the target
-    filter_width : Quantity
-        Width of median filter window (default 0.3 um)
+    filter_width : Quantity or None
+        Width of median filter window (default None for no filtering)
     lam_min : float
         Minimum wavelength for regular output grid
     lam_max : float
@@ -1746,7 +1747,7 @@ def estimate_continuum_fls(
         Whether to overwrite existing output files (default True)
     bandwidth_fraction : float
         Fraction of full Fourier bandwidth to use. Values < 1 act as
-        low-pass filter for smoother continuum (default 0.1)
+        low-pass filter for smoother continuum (default 0.15)
     verbose : bool
         Whether to print progress messages
     **kwargs : dict
@@ -1838,12 +1839,13 @@ def estimate_continuum_fls(
     noise_std /= 0.6745 * np.sqrt(2)
 
     # apply median filter to remove outliers
-    if verbose:
-        print("  Applying median filter...")
-    int_data = median_filter_irregular(
-        lam_data, int_data,
-        x_width=filter_width.to('um').value,
-        show_progress=verbose)
+    if filter_width is not None:
+        if verbose:
+            print("  Applying median filter...")
+        int_data = median_filter_irregular(
+            lam_data, int_data,
+            x_width=filter_width.to('um').value,
+            show_progress=verbose)
     
     # assign weights and handle NaNs
     weights = np.isfinite(int_data).astype(np.float32)
@@ -2045,3 +2047,102 @@ def make_spherex_line_image(
         image_hdu.writeto(outfile, overwrite=overwrite)
 
     return image_hdu
+
+
+def make_spherex_pah_image_naive(
+        # Input cubes
+        int_cube = None,
+        cont_cube = None,
+        # PAH wavelength range
+        lam_min = 3.1*u.um,
+        lam_max = 3.6*u.um,
+        # NaN handling
+        nan_policy = 'interp',  # 'interp' or 'ignore'
+        # Output
+        outfile = None,
+        overwrite = True):
+    """
+    Create an integrated PAH emission image from SPHEREx spectral cubes.
+
+    Note that this only works on the regularly gridded SPHEREx cubes!
+    
+    This function extracts a spectral slab over a specified wavelength range
+    (default 3.1-3.6 um to capture the 3.3 um PAH feature), subtracts the
+    continuum, and integrates along the spectral axis to produce a 2D image
+    of PAH surface brightness. NaN values can be handled either by linear
+    interpolation or by replacing them with zeros.
+    
+    Parameters
+    ----------
+    int_cube : str
+        Path to the gridded spectral cube
+    cont_cube : str
+        Path to the gridded continuum spectral cube
+    lam_min : Quantity, optional
+        Minimum wavelength for spectral extraction (default: 3.1 um)
+    lam_max : Quantity, optional
+        Maximum wavelength for spectral extraction (default: 3.6 um)
+    nan_policy : str, optional
+        How to handle NaN values in the data:
+        - 'interp': Linearly interpolate over NaNs along each spectrum
+        - 'ignore': Replace NaNs with zeros
+        Default is 'interp'
+    outfile : str, optional
+        Output FITS file path. If None, file is not written to disk
+    overwrite : bool, optional
+        Whether to overwrite existing output file (default: True)
+    
+    Returns
+    -------
+    pah_image : Projection
+        2D PAH emission image in units of erg s^-1 cm^-2 sr^-1
+    """
+
+    # read in SPHEREx cubes
+    cube = SpectralCube.read(int_cube)
+    subcube = cube.spectral_slab(lam_min, lam_max)
+
+    cube_cont = SpectralCube.read(cont_cube)
+    subcube_cont = cube_cont.spectral_slab(lam_min, lam_max)
+
+    # continuum subtraction
+    pah_cube = subcube - subcube_cont
+
+    if nan_policy == 'interp':
+        # interpolate over NaNs
+        pah_data = pah_cube.unmasked_data[:].value
+        spectral_axis = pah_cube.spectral_axis
+        for i in tqdm(range(pah_data.shape[1]), desc=f'Interpolating...'):
+            for j in range(pah_data.shape[2]):
+                spectrum = pah_data[:, i, j]
+                valid = np.isfinite(spectrum)
+                if valid.sum() > 1 and not valid.all():
+                    # Interpolate NaN values
+                    spectrum[~valid] = np.interp(
+                        spectral_axis.value[~valid], 
+                        spectral_axis.value[valid], 
+                        spectrum[valid])
+                    pah_data[:, i, j] = spectrum
+        pah_cube = SpectralCube(data=pah_data*pah_cube.unit, wcs=pah_cube.wcs)
+    elif nan_policy == 'ignore':
+        # fill NaNs with zeros
+        pah_data = pah_cube.unmasked_data[:].value
+        pah_data[~np.isfinite(pah_data)] = 0.0
+        pah_cube = SpectralCube(data=pah_data*pah_cube.unit, wcs=pah_cube.wcs)
+    else:
+        raise ValueError(
+            f"nan_policy '{nan_policy}' not recognized.")
+
+    # collapse to make PAH image
+    chan_width_freq = (
+        np.abs(np.median(np.diff(spectral_axis))) *
+        const.c / pah_cube.spectral_axis**2).to('Hz')
+    pah_image = (
+        pah_cube * chan_width_freq.reshape((-1, 1, 1))).sum(axis=0)
+    pah_image = pah_image.to('erg s-1 cm-2 sr-1')
+
+    # write to file
+    if outfile is not None:
+        pah_image.write(outfile, overwrite=overwrite)
+
+    return pah_image
