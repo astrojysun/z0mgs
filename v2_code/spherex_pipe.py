@@ -19,8 +19,8 @@ from utils_spherex import (
 
 # TBD replace with command line calls.
 
-do_download = False
-do_bksub = False
+do_download = True
+do_bksub = True
 do_sed_cube = True
 do_grid = True
 do_estcont = True
@@ -34,7 +34,8 @@ do_lines = True
 root_dir = Path('../../test_data/spherex/')
 
 # Target list table and a list to either restrict to and/or skip
-targ_tab = 'targets_spherex.ecsv'
+#targ_tab = 'targets_spherex.ecsv'
+targ_tab = 'spherex_phangs_targets.ecsv'
 just_targs = []
 skip_targs = []
 
@@ -75,6 +76,9 @@ feature_dict['CO?2.175'] = {'lam':2.175*u.um, 'width':0.125*u.um}
 
 # Write a template table (gives an example of what to modify)
 write_template_tab()
+
+# write_sample_tab(tags=['PHANGS'], outfile='spherex_phangs_targets.ecsv', just_gals=['ngc1808'])
+skip_targs = ['m31', 'm33']
 
 # Read the actual table
 targ_tab = QTable.read(targ_tab, format='ascii.ecsv')

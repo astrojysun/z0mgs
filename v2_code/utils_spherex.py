@@ -69,6 +69,71 @@ def write_template_tab(
 
     return(tab)
 
+def write_sample_tab(
+        outfile=None,
+        galbase='/home/leroy.42/idl/galbase/gal_data/gal_base.fits',
+        tags=[],
+        just_gals=[],
+):
+    """Helper function to write tables for SPHEREx pipeline. Requires a
+    specific database, so may not be generally useful.
+    """
+
+    gb = Table.read(galbase)
+
+    # Identify the targets
+    
+    if (len(tags) == 0) & (len(just_gals) == 0):
+        return(None)
+
+    gb['KEEP_ROW'] = False
+    for this_row in ProgressBar(gb):
+
+        if len(tags) > 0:
+            for this_tag in tags:
+                if this_tag in this_row['TAGS']:
+                    this_row['KEEP_ROW'] = True
+
+        if len(just_gals) > 0:
+            if this_row['OBJNAME'].strip().lower() in just_gals:
+                this_row['KEEP_ROW'] = True
+
+    gb = gb[gb['KEEP_ROW'] == True]
+
+    # Make the table
+    
+    targs = []
+
+    for this_row in gb:
+        targ = {
+            'gal':str(this_row['OBJNAME']).strip().lower(),
+            'ra':float(this_row['RA_DEG'])*u.deg,
+            'dec':float(this_row['DEC_DEG'])*u.deg,
+            'fov':float(this_row['R25_DEG'])*2*60.*u.arcmin,
+            'mask_rad':float(this_row['R25_DEG'])*1.5*60.*u.arcmin,
+            'mask_pa':0.0*u.deg,
+            'mask_incl':0.0*u.deg,
+            'vrad':float(this_row['VHEL_KMS'])*u.km/u.s,
+            'vwidth':float(this_row['VMAXG_KMS']*2.0)*u.km/u.s,
+        }
+
+        if np.isfinite(targ['vwidth']) == False:
+            targ['vwidth'] = 400.*u.km/u.s
+
+        if np.isfinite(targ['vwidth']) == False:
+            targ['vhel_kms'] = 0.0*u.km/u.s
+        
+        targs.append(targ)
+
+    targ_tab = Table(targs)
+
+    
+    
+    if outfile is not None:
+        targ_tab.write(outfile, overwrite=True, delimiter=',',
+                       format='ascii.ecsv')
+    
+    print(targ_tab)
         
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routines to query data from IRSA
