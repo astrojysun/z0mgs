@@ -3,10 +3,11 @@
 import os, glob, sys
 import numpy as np
 import warnings
-from enum import IntFlag, auto
 
 import urllib.request
 import urllib.error
+
+from tqdm import tqdm
 
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
@@ -14,9 +15,8 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import pixel_to_skycoord
 from astropy.nddata import Cutout2D
 from astropy.table import Table, QTable
-from astropy import units as u
+from astropy import units as u, constants as const
 from astropy.stats import sigma_clipped_stats
-import astropy.constants as const
 
 # Astroquery for IRSA access
 from astroquery.ipac.irsa import Irsa
@@ -31,16 +31,19 @@ from astropy.utils.console import ProgressBar
 from utils_z0mgs_images import deproject
 
 # Used to analyze the cube
+from numpy import linalg
 from scipy.interpolate import make_smoothing_spline
-from spectral_cube import SpectralCube
 
 #import warnings
 #warnings.filterwarnings('ignore', category=UserWarning)
 #import astropy.utils.exceptions
-#warnings.simplefilter('ignore', category=astropy.utils.exceptions.AstropyWarning)                     
+#warnings.simplefilter('ignore', category=astropy.utils.exceptions.AstropyWarning)    
+
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Manage targets
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
 
 def write_template_tab(
         outfile='example_spherex_targs.ecsv',
@@ -70,6 +73,7 @@ def write_template_tab(
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routines to query data from IRSA
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
 
 def check_spherex_collections():
     """Query IRSA's collection list to see which collections hold spherex
@@ -320,9 +324,11 @@ def download_images(
 
     return(downloaded_files)
 
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routines to support building a cube
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
 
 def make_wavelength_image(
         hdu_list = None,
@@ -382,6 +388,7 @@ def make_wavelength_image(
 
     # Return images of lambda and bandwidth
     return((lam, bw))
+
 
 def make_cube_header(
         center_coord,
@@ -529,6 +536,7 @@ def make_cube_header(
     else:
         return(hdu)
 
+
 def estimate_spherex_bkgrd(
         image = None,
         header = None,
@@ -591,6 +599,7 @@ def estimate_spherex_bkgrd(
         bkgrd[this_ind] = this_bkgrd_val
 
     return(bkgrd)
+
 
 def bksub_images(
         image_list = None,
@@ -813,6 +822,7 @@ def make_mask_from_flags(
 # Routine to extract an SED
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
+
 def extract_spherex_sed(
         target_coord,        
         image_list = [],
@@ -911,9 +921,11 @@ def extract_spherex_sed(
     
     return(tab)
 
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routines to cubes
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
 
 def build_sed_cube(
         target_hdu = None,
@@ -1023,6 +1035,7 @@ def build_sed_cube(
                         , overwrite=overwrite)
         
     return((int_hdu, lam_hdu, bw_hdu))
+
 
 def grid_spherex_cube(
         # Input cubes
@@ -1149,8 +1162,6 @@ def grid_spherex_cube(
 # Routine to estimate a smooth continuum
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
-# God this is slow - but it does work nicely. Consult on some
-# speedups.
 
 def estimate_continuum(
         # Input cubes
@@ -1327,9 +1338,418 @@ def estimate_continuum(
         
     return((cont_cube_hdu, cont_sed_hdu))
 
+
+def median_filter_irregular(x, y, x_width, show_progress=True):
+    """
+    Apply median filter to irregularly sampled data using x-space window.
+    
+    For each point at position x[i], computes the median of all y values
+    within the x-range [x[i] - x_width/2, x[i] + x_width/2].
+    
+    NaN values are automatically excluded from the median calculation.
+    
+    Parameters:
+    -----------
+    x : (nlam, npix) array
+        Sample positions
+    y : (nlam, npix) array
+        Sample values
+    x_width : float
+        Width of the x-window for median filtering
+    show_progress : bool
+        Whether to show a progress bar during pixel-wise filtering.
+    
+    Returns:
+    --------
+    y_filtered : (nlam, npix) array
+        Median-filtered values
+    """
+    nlam, npix = x.shape
+    y_filtered = np.empty_like(y)
+    half_width = x_width / 2
+    # Loop over each pixel
+    for ipix in tqdm(range(npix), disable=(not show_progress)):
+        # Compute pairwise distances: (nlam, nlam)
+        dist_matrix = np.abs(x[:, ipix][:, None] - x[:, ipix][None, :])
+        # Create distance-based mask: (nlam, nlam)
+        distance_mask = dist_matrix > half_width
+        # Create NaN mask: (nlam, nlam) - True where y values are NaN or x values are NaN
+        nan_mask = (np.isnan(y[:, ipix]) | np.isnan(x[:, ipix]))[None, :]
+        # Combine masks: mask out points that are too far OR have NaN values
+        combined_mask = distance_mask | nan_mask
+        # For each point i, compute median of y[j] where mask[i,j] is False
+        # Use masked array to handle variable number of neighbors
+        y_masked = np.ma.array(np.tile(y[:, ipix], (nlam, 1)), mask=combined_mask)
+        y_filtered[:, ipix] = np.ma.median(y_masked, axis=1).filled(np.nan)
+    return y_filtered
+
+
+def decide_fourier_grid(
+        xlim, fwhm, oversample=2, decay=1e-2, bandwidth_fraction=1.0):
+    """
+    Estimate max frequency and number of components from domain size and resolution.
+    - bandwidth_fraction: < 1 for low-pass filtering
+    """
+    sigma = float(np.nanmedian(fwhm) / 2.3548)  # average sigma from FWHM
+    omega_max = np.sqrt(2.0 * np.log(1.0 / decay)) / sigma
+    omega_max *= bandwidth_fraction             # scale bandwidth
+    N_comp = int(np.ceil((omega_max * (xlim[1] - xlim[0])) / np.pi))
+    N_comp = max(8, int(oversample * N_comp))   # floor to avoid tiny N
+    return float(omega_max), int(N_comp)
+
+
+def reconstruct_fls(
+    x, y, x_bw, weight,
+    # omega grid parameters
+    xlim=None,
+    bandwidth_fraction=1.0,
+    # ridge regularization
+    lam0=1e-2,
+    # progress bar
+    verbose=True):
+    """
+    Spectral reconstruction from irregular samples using Fourier Least Squares.
+
+    Accounts for per-sample Gaussian LSFs.
+    Uses basic ridge regularization.
+    
+    Parameters:
+    -----------
+    x : (nlam, npix) array
+        Sample positions
+    y : (nlam, npix) array
+        Sample values
+    x_bw : (nlam, npix) array
+        Per-sample FWHM (in x-units)
+    weight : (nlam, npix) array, optional
+        Per-sample weights (e.g., 1/variance). If None, estimated from noise.
+    xlim : tuple of (xmin, xmax), optional
+        Range for determining Fourier grid. If None, uses min/max of x.
+    bandwidth_fraction : float
+        Fraction of full bandwidth to use (< 1.0 for low-pass filtering)
+    lam0 : float
+        Ridge regularization strength
+    show_progress : bool
+        Whether to show a progress bar during pixel-wise solving.
+
+    Returns:
+    --------
+    model : callable
+        Function that takes x_out (mlam,) array and returns y_out (mlam, npix) array
+    """
+    nlam, npix = x.shape
+
+    # Compute Fourier space grid
+    if verbose:
+        print("  Deciding Fourier grid...")
+    if xlim is None:
+        xlim = np.nanmin(x), np.nanmax(x)
+    omega_max, ncomp = decide_fourier_grid(
+        xlim, np.nanmean(x_bw),
+        bandwidth_fraction=bandwidth_fraction)
+    omega = np.linspace(-omega_max, omega_max, ncomp)
+
+    # Forward model
+    if verbose:
+        print("  Building forward model...")
+    sigma = x_bw / 2.3548  # (nlam,npix)
+    H = np.exp(-0.5 * (sigma[..., None] * omega[None, None, :])**2)  # (nlam,npix,ncomp)
+    Phi = np.exp(1j * x[..., None] * omega[None, None, :])           # (nlam,npix,ncomp)
+    A = H * Phi  # (nlam,npix,ncomp)
+
+    # Apply weights
+    if verbose:
+        print("  Applying weights...")
+    A = A * weight[..., None]      # (nlam,npix,ncomp)
+    y_eff = y * weight       # (nlam,npix)
+
+    # Normal equations per batch
+    if verbose:
+        print("  Normalizing equations...")
+    ATA = np.einsum('nbk,nbl->bkl', A.conj(), A)   # (npix,ncomp,ncomp)
+    ATy = np.einsum('nbk,nb->bk',  A.conj(), y_eff) # (npix,ncomp)
+
+    # Ridge regularization
+    ATA += lam0 * np.eye(ncomp)[None, :, :]
+
+    # Solve per batch
+    if verbose:
+        print("  Solving for Fourier coefficients...")
+    solutions = np.empty((npix, ncomp), dtype=complex)
+    for ipix in range(npix):
+        solutions[ipix] = linalg.solve(ATA[ipix], ATy[ipix])
+
+    # Return a function that evaluates on any output grid
+    def model(x_out):
+        """
+        Evaluate the reconstructed spectrum at given positions.
+        
+        Parameters:
+        -----------
+        x_out : (mlam,) or (mlam, npix) array
+            Output grid positions. If 1D, same grid is used for all pixels.
+            If 2D, each pixel can have a different output grid.
+            
+        Returns:
+        --------
+        y_out : (mlam, npix) array
+            Reconstructed signal on target grid x_out
+        """
+        x_out = np.asarray(x_out)
+        if x_out.ndim == 1:
+            # Same grid for all pixels
+            Phi_g = np.exp(1j * x_out[:, None] * omega[None, :])  # (mlam,ncomp)
+            y_out = np.real(Phi_g @ solutions.T)  # (mlam,npix)
+            # Avoid extrapolation: mask values outside training range
+            x_min, x_max = np.nanmin(x), np.nanmax(x)
+            extrapolation_mask = (x_out < x_min) | (x_out > x_max)
+            y_out[extrapolation_mask, :] = np.nan
+        elif x_out.ndim == 2:
+            # Different grid for each pixel
+            mlam, npix_out = x_out.shape
+            if npix_out != npix:
+                raise ValueError(f"x_out has {npix_out} pixels but model has {npix} pixels")
+            Phi_g = np.exp(1j * x_out[:, :, None] * omega[None, None, :])  # (mlam,npix,ncomp)
+            y_out = np.real(np.einsum('mpk,pk->mp', Phi_g, solutions))  # (mlam,npix)
+            # Avoid extrapolation: mask values outside training range per pixel
+            x_min = np.nanmin(x, axis=0)  # (npix,)
+            x_max = np.nanmax(x, axis=0)  # (npix,)
+            extrapolation_mask = (x_out < x_min[None, :]) | (x_out > x_max[None, :])  # (mlam,npix)
+            y_out[extrapolation_mask] = np.nan
+        else:
+            raise ValueError(f"x_out must be 1D or 2D, got shape {x_out.shape}")
+        return y_out
+    
+    return model
+
+
+def estimate_continuum_fls(
+        # Input cubes
+        int_cube = None,
+        lam_cube = None,
+        bw_cube = None,
+        # Features to flag out
+        features_to_flag = [],
+        feature_dict = {},
+        # Redshift
+        vrad = 0.0*u.km/u.s,
+        vwidth = 0.0*u.km/u.s,
+        # Width of median filter
+        filter_width = 0.3*u.um,
+        # Desired wavelength grid
+        lam_min = 0.7,
+        lam_max = 5.2,
+        lam_step = 0.0075,
+        lam_unit = 'um',
+        # Output
+        outfile_seds = None,
+        outfile_cube = None,
+        overwrite=True,
+        # arguments for FLS
+        bandwidth_fraction=0.1,
+        verbose=True,
+        **kwargs):
+    """
+    Estimate continuum from a SED cube using Fourier Least Squares method.
+    
+    Uses a Fourier Least Squares approach to fit a smooth continuum to
+    irregularly sampled spectral data while accounting for per-sample LSFs.
+    Line features can be masked before fitting. The continuum is evaluated
+    on both the original SED grid and/or a regular wavelength grid.
+    
+    Parameters
+    ----------
+    int_cube : str
+        Path to FITS file containing intensity cube (nlam, ny, nx)
+    lam_cube : str, optional
+        Path to wavelength cube. If None, derived from int_cube filename
+    bw_cube : str, optional
+        Path to bandwidth cube. If None, derived from int_cube filename
+    features_to_flag : list of str
+        Names of spectral features to mask before continuum fitting
+    feature_dict : dict
+        Dictionary mapping feature names to dicts with 'lam' and 'width' keys
+    vrad : Quantity
+        Radial velocity of the target
+    vwidth : Quantity
+        Velocity width of the target
+    filter_width : Quantity
+        Width of median filter window (default 0.3 um)
+    lam_min : float
+        Minimum wavelength for regular output grid
+    lam_max : float
+        Maximum wavelength for regular output grid
+    lam_step : float
+        Wavelength step for regular output grid
+    lam_unit : str
+        Unit for wavelength axis in output (default 'um')
+    outfile_seds : str, optional
+        Output file for continuum evaluated on original SED grid
+    outfile_cube : str, optional
+        Output file for continuum on regular wavelength grid
+    overwrite : bool
+        Whether to overwrite existing output files (default True)
+    bandwidth_fraction : float
+        Fraction of full Fourier bandwidth to use. Values < 1 act as
+        low-pass filter for smoother continuum (default 0.1)
+    verbose : bool
+        Whether to print progress messages
+    **kwargs : dict
+        Additional arguments passed to reconstruct_fls()
+    
+    Returns
+    -------
+    fls_model : callable
+        Function that takes wavelength array and returns continuum values.
+        Can be called with 1D array (mlam,) or 2D array (mlam, npix).
+    
+    Notes
+    -----
+    The FLS method accounts for per-pixel variations in wavelength sampling
+    and bandwidth. It is particularly effective for handling irregular
+    sampling and provides smooth interpolation without strong assumptions
+    about the functional form of the continuum.
+    """
+    
+    if lam_cube is None:
+        lam_cube = str(int_cube).replace('.fits','_lam.fits')        
+        
+    if bw_cube is None:
+        bw_cube = str(int_cube).replace('.fits','_bw.fits')
+
+    lam_data, hdr = fits.getdata(lam_cube, header=True)
+    assert hdr['BUNIT'] == 'um'
+    bw_data, hdr = fits.getdata(bw_cube, header=True)
+    assert hdr['BUNIT'] == 'um'
+    int_data, hdr = fits.getdata(int_cube, header=True)
+    
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Flag features
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    if verbose:
+        print("  Flagging line features...")
+
+    # Doppler shift for source redshift and width
+    dopp_fac = np.sqrt((1.0+vrad/const.c)/(1.0-vrad/const.c))
+    dopp_fac_high = np.sqrt(
+        (1.0+(vrad+vwidth)/const.c)/(1.0-(vrad+vwidth)/const.c))
+    dopp_fac_low = np.sqrt(
+        (1.0+(vrad-vwidth)/const.c)/(1.0-(vrad-vwidth)/const.c))
+    dopp_fac_width = dopp_fac_high - dopp_fac_low
+
+    for this_feature in features_to_flag:
+
+        if verbose and (this_feature not in feature_dict):
+            print(f"Warning: Feature '{this_feature}' not recognized -- ignore")
+            continue
+        
+        this_feature_lam = feature_dict[this_feature]['lam']
+        this_feature_width = feature_dict[this_feature]['width']
+
+        # Identify where the wavelength of a data point overlaps with
+        # the line (considering redshift, bandwidth, and line width)
+        abs_delta_lam = np.abs(
+            (this_feature_lam * dopp_fac).to(u.um).value - lam_data)
+        window_width = np.sqrt(
+            (dopp_fac_width * this_feature_lam).to(u.um).value**2 +
+            bw_data**2 +
+            this_feature_width.to(u.um).value**2)
+
+        # Blank the intensity here
+        int_data[abs_delta_lam <= window_width] = np.nan
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Prepare data for FLS
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    if verbose:
+        print("  Organizing data for FLS...")
+
+    # reshape to 2D arrays (wavelength, pixel)
+    nlam, ny, nx = int_data.shape
+    int_data = int_data.reshape((nlam, ny*nx))
+    lam_data = lam_data.reshape((nlam, ny*nx))
+    bw_data = bw_data.reshape((nlam, ny*nx))
+
+    # sort by wavelength
+    sort_idx = np.argsort(lam_data, axis=0)
+    lam_data = np.take_along_axis(lam_data, sort_idx, axis=0)
+    int_data = np.take_along_axis(int_data, sort_idx, axis=0)
+    bw_data = np.take_along_axis(bw_data, sort_idx, axis=0)
+
+    # estimate noise per spectrum
+    noise_std = np.nanmedian(np.abs(np.diff(int_data, axis=0)), axis=0)
+    noise_std /= 0.6745 * np.sqrt(2)
+
+    # apply median filter to remove outliers
+    if verbose:
+        print("  Applying median filter...")
+    int_data = median_filter_irregular(
+        lam_data, int_data,
+        x_width=filter_width.to('um').value,
+        show_progress=verbose)
+    
+    # assign weights and handle NaNs
+    weights = np.isfinite(int_data).astype(np.float32)
+    weights /= noise_std[None, :]**2
+    int_data[np.isnan(int_data)] = 0.0
+    lam_data[np.isnan(lam_data)] = 0.0
+    bw_data[np.isnan(bw_data)] = 1.0
+
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Model continuum with FLS
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    fls_model = reconstruct_fls(
+        lam_data, int_data, bw_data, weights,
+        bandwidth_fraction=bandwidth_fraction, **kwargs)
+    
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+    # Evaluate on output grids
+    # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+    if outfile_seds is not None:
+        if verbose:
+            print("  Evaluating on SED grid...")
+        # evaluate on SED grid
+        cont_sed = fls_model(lam_data)
+        cont_sed[lam_data == 0.0] = np.nan
+        # restore original order
+        inv_sort_idx = np.argsort(sort_idx, axis=0)
+        cont_sed = np.take_along_axis(
+            cont_sed, inv_sort_idx, axis=0)
+        # reshape to cube
+        cont_sed = cont_sed.reshape((nlam, ny, nx))
+        # write to file
+        cont_sed_hdu = fits.PrimaryHDU(cont_sed.astype(np.float32), hdr)
+        cont_sed_hdu.writeto(outfile_seds, overwrite=overwrite)
+
+    if outfile_cube is not None:
+        if verbose:
+            print("  Evaluating on cube grid...")
+        # create regular output grid
+        lam_out = np.arange(lam_min, lam_max + lam_step, lam_step)
+        hdr['NAXIS'] = 3
+        hdr['NAXIS3'] = len(lam_out)
+        hdr['CTYPE3'] = 'WAVE'
+        hdr['CUNIT3'] = lam_unit
+        hdr['CRPIX3'] = 1
+        hdr['CRVAL3'] = lam_out[0]
+        hdr['CDELT3'] = lam_step
+        # evaluate model
+        cont_cube = fls_model(lam_out).reshape((len(lam_out), ny, nx))
+        # write to file
+        cont_cube_hdu = fits.PrimaryHDU(cont_cube.astype(np.float32), hdr)
+        cont_cube_hdu.writeto(outfile_cube, overwrite=overwrite)
+
+    return fls_model
+
+
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routine to make a line map
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
 
 def make_spherex_line_image(
         # Input cubes
@@ -1361,7 +1781,7 @@ def make_spherex_line_image(
     line_lam_rest = feature_dict['lam']
     line_lam_obs = line_lam_rest * (1 + (vrad / const.c).to('').value)
 
-    # zoom in on relevant data by sorting and selecting nearest channels (vectorized)
+    # zoom in on relevant data by sorting and selecting nearest channels
     # First, load only wavelength cube to determine sorting order
     with fits.open(lam_cube) as hdul:
 
@@ -1372,43 +1792,48 @@ def make_spherex_line_image(
         # Calculate wavelength distance from line for all pixels
         abs_delta_lam_full = np.abs(lam_full - line_lam_obs)
         
-        # Get dimensions
-        nz_full, ny, nx = lam_full.shape
-        n_channels = 20  # number of nearest channels to keep
+        # Set number of nearest channels to keep (within +-0.3um of the line)
+        n_channels = (abs_delta_lam_full < 0.3*u.um).sum(axis=0).max()
+        n_channels = np.max([10, n_channels])
         
-        # Sort along spectral axis (axis=0) - argsort returns indices
-        sort_idx = np.argsort(abs_delta_lam_full.value, axis=0)[:n_channels, :, :]
-        
-        # Use take_along_axis for cleaner indexing
-        abs_delta_lam = np.take_along_axis(abs_delta_lam_full.value, sort_idx, axis=0) * u_lam
+        # Sort and index along spectral axis
+        sort_idx = np.argsort(
+            abs_delta_lam_full.value, axis=0)[:n_channels, :, :]
+        abs_delta_lam = np.take_along_axis(
+            abs_delta_lam_full.value, sort_idx, axis=0) * u_lam
         
         # Clean up large arrays
         del lam_full, abs_delta_lam_full
     
-    # Now load and subselect each cube separately to limit memory
+    # Now load and subselect each cube separately to limit memory use
     with fits.open(int_cube) as hdul:
         u_int = u.Unit(hdul[0].header['BUNIT'])
-        int_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_int
+        int_data = np.take_along_axis(
+            hdul[0].data, sort_idx, axis=0) * u_int
     
     with fits.open(bw_cube) as hdul:
         u_bw = u.Unit(hdul[0].header['BUNIT'])
-        bw_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_bw
+        bw_data = np.take_along_axis(
+            hdul[0].data, sort_idx, axis=0) * u_bw
     
     with fits.open(cont_cube) as hdul:
-        cont_data = np.take_along_axis(hdul[0].data, sort_idx, axis=0) * u_int
+        cont_data = np.take_along_axis(
+            hdul[0].data, sort_idx, axis=0) * u_int
     
     # subtract continuum
     line_data = int_data - cont_data
 
     # find bandwidth in the closest channel to the line along each sightline
-    bw_line_lam = np.take_along_axis(
-        bw_data, abs_delta_lam.argmin(axis=0)[np.newaxis, :, :], axis=0)[0, :, :]
+    bw_line_lam = bw_data[0, :, :]
 
     # integrate according to LSF
     if lsf == 'tophat':
 
-        # average over all data points where line falls within the tophat LSF
-        lsf_mask = (abs_delta_lam <= (0.5 * bw_line_lam)) & np.isfinite(line_data)
+        # find all data points where line falls within the tophat LSF
+        lsf_mask = (
+            (abs_delta_lam <= (0.5 * bw_line_lam)) & np.isfinite(line_data))
+        
+        # simple average over relevant data points
         line_image = (
             np.nansum(line_data * lsf_mask, axis=0) /
             np.nansum(lsf_mask, axis=0))
@@ -1433,7 +1858,8 @@ def make_spherex_line_image(
             np.sqrt(2 * np.pi * sigma_lam**2)).to('um-1')
 
         # weighted average over relevant data points
-        # (assuming uniform noise on all data points, and weight = 1/noise^2)
+        # (assuming uniform noise on all data points, and assign weights
+        # according to the noise level after scaling by the LSF)
         line_image = (
             np.nansum(line_data * lsf_curve * lsf_mask, axis=0) /
             np.nansum(lsf_curve**2 * lsf_mask, axis=0))
