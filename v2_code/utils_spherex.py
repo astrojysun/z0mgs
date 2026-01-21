@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import os, glob, sys
+import os, glob
 import numpy as np
 import warnings
 
@@ -13,32 +13,183 @@ from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import pixel_to_skycoord
-from astropy.nddata import Cutout2D
 from astropy.table import Table, QTable
 from astropy import units as u, constants as const
-from astropy.stats import sigma_clipped_stats
 
 # Astroquery for IRSA access
 from astroquery.ipac.irsa import Irsa
 
 # Reproject for image alignment
 from reproject import reproject_interp
-from reproject.mosaicking import find_optimal_celestial_wcs
-
-from astropy.utils.console import ProgressBar
-
-# Could move ths into the file
-from utils_z0mgs_images import deproject
 
 # Used to analyze the cube
 from numpy import linalg
 from scipy.interpolate import make_smoothing_spline
+from spectral_cube import SpectralCube
 
 #import warnings
 #warnings.filterwarnings('ignore', category=UserWarning)
 #import astropy.utils.exceptions
 #warnings.simplefilter('ignore', category=astropy.utils.exceptions.AstropyWarning)    
 
+
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Related to deprojection
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+
+
+def deproject(
+        center_coord=None,
+        incl=0*u.deg,
+        pa=0*u.deg,
+        template_header=None,
+        template_wcs=None,
+        template_naxis=None,
+        template_ra=None,
+        template_dec=None,
+        return_offset=False,
+        verbose=False):
+    """Calculate deprojected radii and projected angles in a disk.
+
+    This function deals with projected images of astronomical objects
+    with an intrinsic disk geometry. Given sky coordinates of the disk
+    center, disk inclination and position angle, this function
+    calculates deprojected radii and projected angles based on
+
+    (1) a FITS header (`header`), or
+
+    (2) a WCS object with specified axis sizes (`wcs` + `naxis`), or
+    
+    (3) RA and DEC coodinates (`ra` + `dec`).
+    
+    Both deprojected radii and projected angles are defined relative
+    to the center in the inclined disk frame. For (1) and (2), the
+    outputs are 2D images; for (3), the outputs are arrays with shapes
+    matching the broadcasted shape of `ra` and `dec`.
+
+    Parameters
+    ----------
+    center_coord : `~astropy.coordinates.SkyCoord` object or array-like
+        Sky coordinates of the disk center
+    incl : `~astropy.units.Quantity` object or number, optional
+        Inclination angle of the disk (0 degree means face-on)
+        Default is 0 degree.
+    pa : `~astropy.units.Quantity` object or number, optional
+        Position angle of the disk (red/receding side, North->East)
+        Default is 0 degree.
+    header : `~astropy.io.fits.Header` object, optional
+        FITS header specifying the WCS and size of the output 2D maps
+    wcs : `~astropy.wcs.WCS` object, optional
+        WCS of the output 2D maps
+    naxis : array-like (with two elements), optional
+        Size of the output 2D maps
+    ra : array-like, optional
+        RA coordinate of the sky locations of interest
+    dec : array-like, optional
+        DEC coordinate of the sky locations of interest
+    return_offset : bool, optional
+        Whether to return the angular offset coordinates together with
+        deprojected radii and angles. Default is to not return.
+
+    Returns
+    -------
+    deprojected coordinates : list of arrays
+        If `return_offset` is set to True, the returned arrays include
+        deprojected radii, projected angles, as well as angular offset
+        coordinates along East-West and North-South direction;
+        otherwise only the former two arrays will be returned.
+
+    Notes
+    -----
+    This is the Python version of an IDL function `deproject` included in the `cpropstoo` package. See URL below:
+
+    https://github.com/akleroy/cpropstoo/blob/master/cubes/deproject.pro
+
+    Convention on the in-plane position angle w.r.t. the receding node may be flipped.
+
+    Python routine from Jiayi Sun. Modified for compatibility with
+    z0mgs namespace.
+
+    """
+
+    if isinstance(center_coord, SkyCoord):
+        x0_deg = center_coord.ra.degree
+        y0_deg = center_coord.dec.degree
+    else:
+        x0_deg, y0_deg = center_coord
+        if hasattr(x0_deg, 'unit'):
+            x0_deg = x0_deg.to(u.deg).value
+            y0_deg = y0_deg.to(u.deg).value
+    if hasattr(incl, 'unit'):
+        incl_deg = incl.to(u.deg).value
+    else:
+        incl_deg = incl
+    if hasattr(pa, 'unit'):
+        pa_deg = pa.to(u.deg).value
+    else:
+        pa_deg = pa
+
+    if template_header is not None:
+        wcs_cel = WCS(template_header).celestial
+        naxis1 = template_header['NAXIS1']
+        naxis2 = template_header['NAXIS2']
+        # create ra and dec grids
+        ix = np.arange(naxis1)
+        iy = np.arange(naxis2).reshape(-1, 1)
+        ra_deg, dec_deg = wcs_cel.wcs_pix2world(ix, iy, 0)
+    elif (template_wcs is not None) and \
+         (template_naxis is not None):
+        wcs_cel = template_wcs.celestial
+        naxis1, naxis2 = template_naxis
+        # create ra and dec grids
+        ix = np.arange(naxis1)
+        iy = np.arange(naxis2).reshape(-1, 1)
+        ra_deg, dec_deg = wcs_cel.wcs_pix2world(ix, iy, 0)
+    else:
+        if template_ra.ndim == 1:
+            ra_deg, dec_deg = \
+                np.broadcast_arrays(template_ra, template_dec)
+        else:
+            ra_deg, dec_deg = template_ra, template_dec
+            if verbose:
+                print("ra ndim != 1")
+        if hasattr(template_ra, 'unit'):
+            ra_deg = template_ra.to(u.deg).value
+            dec_deg = template_dec.to(u.deg).value
+    
+    
+    #else:
+        #ra_deg, dec_deg = np.broadcast_arrays(ra, dec)
+        #if hasattr(ra_deg, 'unit'):
+            #ra_deg = ra_deg.to(u.deg).value
+            #dec_deg = dec_deg.to(u.deg).value
+
+    # recast the ra and dec arrays in term of the center coordinates
+    # arrays are now in degrees from the center
+    dx_deg = (ra_deg - x0_deg) * np.cos(np.deg2rad(y0_deg))
+    dy_deg = dec_deg - y0_deg
+
+    # rotation angle (rotate x-axis up to the major axis)
+    rotangle = np.pi/2 - np.deg2rad(pa_deg)
+
+    # create deprojected coordinate grids
+    deprojdx_deg = (dx_deg * np.cos(rotangle) +
+                    dy_deg * np.sin(rotangle))
+    deprojdy_deg = (dy_deg * np.cos(rotangle) -
+                    dx_deg * np.sin(rotangle))
+    deprojdy_deg /= np.cos(np.deg2rad(incl_deg))
+
+    # make map of deprojected distance from the center
+    radius_deg = np.sqrt(deprojdx_deg**2 + deprojdy_deg**2)
+
+    # make map of angle w.r.t. position angle
+    projang_deg = np.rad2deg(np.arctan2(deprojdy_deg, deprojdx_deg))
+
+    if return_offset:
+        return radius_deg, projang_deg, deprojdx_deg , deprojdy_deg
+    else:
+        return radius_deg, projang_deg
+    
 
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Manage targets
@@ -711,7 +862,7 @@ def bksub_images(
 
     bksub_image_list = []
     
-    for this_fname in ProgressBar(image_list):
+    for this_fname in tqdm(image_list):
 
         this_hdu_list = fits.open(this_fname)
 
@@ -936,7 +1087,7 @@ def extract_spherex_sed(
     
     counter = 0
     
-    for this_fname in ProgressBar(image_list):        
+    for this_fname in tqdm(image_list):        
         
         this_hdu_list = fits.open(this_fname)
         hdu_image = this_hdu_list['IMAGE']
@@ -1031,7 +1182,7 @@ def build_sed_cube(
     # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
     zz = 0
-    for this_fname in ProgressBar(image_list):   
+    for this_fname in tqdm(image_list):   
 
         # Open this file
         
@@ -1166,7 +1317,7 @@ def grid_spherex_cube(
         finite_lam = np.isfinite(lam_cube)
         finite_val = np.isfinite(int_cube)
         
-        for zz in ProgressBar(range(nz)):
+        for zz in tqdm(range(nz)):
 
             this_lam = lam_array[zz]
             
@@ -1335,7 +1486,7 @@ def estimate_continuum(
     cont_cube = np.zeros((nz, ny, nx), dtype=np.float32)*np.nan
 
     # Loop over the spectra
-    for yy in ProgressBar(range(ny)):
+    for yy in tqdm(range(ny)):
         for xx in range(nx):
             
             # Get this SED
@@ -1600,7 +1751,7 @@ def estimate_continuum_fls(
         vrad = 0.0*u.km/u.s,
         vwidth = 0.0*u.km/u.s,
         # Width of median filter
-        filter_width = 0.3*u.um,
+        filter_width = None,
         # Desired wavelength grid
         lam_min = 0.7,
         lam_max = 5.2,
@@ -1611,7 +1762,7 @@ def estimate_continuum_fls(
         outfile_cube = None,
         overwrite=True,
         # arguments for FLS
-        bandwidth_fraction=0.1,
+        bandwidth_fraction=0.15,
         verbose=True,
         **kwargs):
     """
@@ -1638,8 +1789,8 @@ def estimate_continuum_fls(
         Radial velocity of the target
     vwidth : Quantity
         Velocity width of the target
-    filter_width : Quantity
-        Width of median filter window (default 0.3 um)
+    filter_width : Quantity or None
+        Width of median filter window (default None for no filtering)
     lam_min : float
         Minimum wavelength for regular output grid
     lam_max : float
@@ -1656,7 +1807,7 @@ def estimate_continuum_fls(
         Whether to overwrite existing output files (default True)
     bandwidth_fraction : float
         Fraction of full Fourier bandwidth to use. Values < 1 act as
-        low-pass filter for smoother continuum (default 0.1)
+        low-pass filter for smoother continuum (default 0.15)
     verbose : bool
         Whether to print progress messages
     **kwargs : dict
@@ -1748,12 +1899,13 @@ def estimate_continuum_fls(
     noise_std /= 0.6745 * np.sqrt(2)
 
     # apply median filter to remove outliers
-    if verbose:
-        print("  Applying median filter...")
-    int_data = median_filter_irregular(
-        lam_data, int_data,
-        x_width=filter_width.to('um').value,
-        show_progress=verbose)
+    if filter_width is not None:
+        if verbose:
+            print("  Applying median filter...")
+        int_data = median_filter_irregular(
+            lam_data, int_data,
+            x_width=filter_width.to('um').value,
+            show_progress=verbose)
     
     # assign weights and handle NaNs
     weights = np.isfinite(int_data).astype(np.float32)
@@ -1955,3 +2107,102 @@ def make_spherex_line_image(
         image_hdu.writeto(outfile, overwrite=overwrite)
 
     return image_hdu
+
+
+def make_spherex_pah_image_naive(
+        # Input cubes
+        int_cube = None,
+        cont_cube = None,
+        # PAH wavelength range
+        lam_min = 3.1*u.um,
+        lam_max = 3.6*u.um,
+        # NaN handling
+        nan_policy = 'interp',  # 'interp' or 'ignore'
+        # Output
+        outfile = None,
+        overwrite = True):
+    """
+    Create an integrated PAH emission image from SPHEREx spectral cubes.
+
+    Note that this only works on the regularly gridded SPHEREx cubes!
+    
+    This function extracts a spectral slab over a specified wavelength range
+    (default 3.1-3.6 um to capture the 3.3 um PAH feature), subtracts the
+    continuum, and integrates along the spectral axis to produce a 2D image
+    of PAH surface brightness. NaN values can be handled either by linear
+    interpolation or by replacing them with zeros.
+    
+    Parameters
+    ----------
+    int_cube : str
+        Path to the gridded spectral cube
+    cont_cube : str
+        Path to the gridded continuum spectral cube
+    lam_min : Quantity, optional
+        Minimum wavelength for spectral extraction (default: 3.1 um)
+    lam_max : Quantity, optional
+        Maximum wavelength for spectral extraction (default: 3.6 um)
+    nan_policy : str, optional
+        How to handle NaN values in the data:
+        - 'interp': Linearly interpolate over NaNs along each spectrum
+        - 'ignore': Replace NaNs with zeros
+        Default is 'interp'
+    outfile : str, optional
+        Output FITS file path. If None, file is not written to disk
+    overwrite : bool, optional
+        Whether to overwrite existing output file (default: True)
+    
+    Returns
+    -------
+    pah_image : Projection
+        2D PAH emission image in units of erg s^-1 cm^-2 sr^-1
+    """
+
+    # read in SPHEREx cubes
+    cube = SpectralCube.read(int_cube)
+    subcube = cube.spectral_slab(lam_min, lam_max)
+
+    cube_cont = SpectralCube.read(cont_cube)
+    subcube_cont = cube_cont.spectral_slab(lam_min, lam_max)
+
+    # continuum subtraction
+    pah_cube = subcube - subcube_cont
+
+    if nan_policy == 'interp':
+        # interpolate over NaNs
+        pah_data = pah_cube.unmasked_data[:].value
+        spectral_axis = pah_cube.spectral_axis
+        for i in tqdm(range(pah_data.shape[1]), desc=f'Interpolating...'):
+            for j in range(pah_data.shape[2]):
+                spectrum = pah_data[:, i, j]
+                valid = np.isfinite(spectrum)
+                if valid.sum() > 1 and not valid.all():
+                    # Interpolate NaN values
+                    spectrum[~valid] = np.interp(
+                        spectral_axis.value[~valid], 
+                        spectral_axis.value[valid], 
+                        spectrum[valid])
+                    pah_data[:, i, j] = spectrum
+        pah_cube = SpectralCube(data=pah_data*pah_cube.unit, wcs=pah_cube.wcs)
+    elif nan_policy == 'ignore':
+        # fill NaNs with zeros
+        pah_data = pah_cube.unmasked_data[:].value
+        pah_data[~np.isfinite(pah_data)] = 0.0
+        pah_cube = SpectralCube(data=pah_data*pah_cube.unit, wcs=pah_cube.wcs)
+    else:
+        raise ValueError(
+            f"nan_policy '{nan_policy}' not recognized.")
+
+    # collapse to make PAH image
+    chan_width_freq = (
+        np.abs(np.median(np.diff(spectral_axis))) *
+        const.c / pah_cube.spectral_axis**2).to('Hz')
+    pah_image = (
+        pah_cube * chan_width_freq.reshape((-1, 1, 1))).sum(axis=0)
+    pah_image = pah_image.to('erg s-1 cm-2 sr-1')
+
+    # write to file
+    if outfile is not None:
+        pah_image.write(outfile, overwrite=overwrite)
+
+    return pah_image

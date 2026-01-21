@@ -9,7 +9,7 @@ from utils_spherex import (
     search_spherex_images, download_images,
     bksub_images, make_cube_header, build_sed_cube, 
     grid_spherex_cube, estimate_continuum_fls,
-    make_spherex_line_image)
+    make_spherex_line_image, make_spherex_pah_image_naive)
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Set the control flow
@@ -177,9 +177,11 @@ for this_row in targ_tab:
 
         # Download or check for existence of images
 
-        downloaded_images = download_images(
-            image_tab, outdir=str(raw_dir)+'/', alt_dirs=alt_dirs,
-            incremental=True, verbose=True)
+        for i in range(2):
+            print(f"\n=====\nTry {i+1}\n=====\n")
+            downloaded_images = download_images(
+                image_tab, outdir=str(raw_dir)+'/', alt_dirs=alt_dirs,
+                incremental=True, verbose=True)
 
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
     # Background subtract the raw images
@@ -288,6 +290,8 @@ for this_row in targ_tab:
 
         for line in ['Paa', 'Pab', 'Bra', 'Brb', 'Pfb']:
 
+            print(f"...{line}")
+
             make_spherex_line_image(
                 int_cube=gal_dir / (this_gal+'_spherex_seds.fits'),
                 cont_cube=gal_dir / (this_gal+'_spherex_seds_smooth.fits'),
@@ -303,3 +307,12 @@ for this_row in targ_tab:
                 vrad=this_vrad, lsf='gaussian',
                 outfile=gal_dir / (this_gal+f'_spherex_line_{line}_gaussian.fits'),
                 overwrite=True)
+
+        print("...PAH")
+
+        make_spherex_pah_image_naive(
+            int_cube=gal_dir / (this_gal+'_spherex_cube.fits'),
+            cont_cube=gal_dir / (this_gal+'_spherex_cube_smooth.fits'),
+            lam_min=3.1*u.um, lam_max=3.6*u.um, nan_policy='interp',
+            outfile=gal_dir / (this_gal+'_spherex_line_PAH_naive.fits'),
+            overwrite=True)
