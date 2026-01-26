@@ -1962,7 +1962,52 @@ def estimate_continuum_fls(
 
     return fls_model
 
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
+# Routine to integrate the continuum
+# &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 
+def integrate_continuum(
+        # Input cube
+        cont_cube = None,
+        # Wavelength range
+        lam_min = None,
+        lam_max = None,
+        # Output file
+        outfile= None,
+        overwrite= True,
+        ):
+    """
+    """
+    
+    cube = SpectralCube.read(cont_cube)
+
+    lam_axis = cube.spectral_axis
+    if lam_min is None:
+        np.nanmin(lam_axis)
+    if lam_max is None:
+        np.nanmax(lam_axis)
+        
+    subcube = cube.spectral_slab(lam_min, lam_max)
+
+    hdr_2d = cube.header.copy()
+    hdr_2d['NAXIS'] = 2
+    del hdr_2d['NAXIS3']
+    del hdr_2d['CRVAL3']
+    del hdr_2d['CDELT3']
+    del hdr_2d['CRPIX3']
+    del hdr_2d['CTYPE3']
+    del hdr_2d['CUNIT3']
+
+    image = subcube.median(axis=0).filled_data[:].value
+    print(type(image))
+
+    hdu = fits.PrimaryHDU(data = image, header = hdr_2d)
+    if outfile is not None:
+        hdu.writeto(outfile, overwrite=overwrite)
+
+    return(hdu)
+    
+    
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%
 # Routine to make a line map
 # &%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%&%

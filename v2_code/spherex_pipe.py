@@ -9,6 +9,7 @@ from utils_spherex import (
     search_spherex_images, download_images,
     bksub_images, make_cube_header, build_sed_cube, 
     grid_spherex_cube, estimate_continuum_fls,
+    integrate_continuum,
     make_spherex_line_image, make_spherex_pah_image_naive)
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
@@ -19,12 +20,13 @@ from utils_spherex import (
 
 # TBD replace with command line calls.
 
-do_download = True
-do_bksub = True
-do_sed_cube = True
-do_grid = True
-do_estcont = True
-do_lines = True
+do_download = False
+do_bksub = False
+do_sed_cube = False
+do_grid = False
+do_estcont = False
+do_contimage = True
+do_lines = False
 
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 # Set parameters
@@ -32,12 +34,6 @@ do_lines = True
 
 # Root directory
 root_dir = Path('../../test_data/spherex/')
-
-# Target list table and a list to either restrict to and/or skip
-#targ_tab = 'targets_spherex.ecsv'
-targ_tab = 'spherex_phangs_targets.ecsv'
-just_targs = []
-skip_targs = []
 
 # Define flags to use
 flags_to_use = [
@@ -74,11 +70,18 @@ feature_dict['CO?2.175'] = {'lam':2.175*u.um, 'width':0.125*u.um}
 # Handle the targets
 # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&
 
+# Target list table and a list to either restrict to and/or skip
+#targ_tab = 'targets_spherex.ecsv'
+targ_tab = 'spherex_phangs_targets.ecsv'
+#just_targs = ['m33',]
+just_targs = []
+skip_targs = []
+
 # Write a template table (gives an example of what to modify)
 write_template_tab()
 
 # write_sample_tab(tags=['PHANGS'], outfile='spherex_phangs_targets.ecsv', just_gals=['ngc1808'])
-skip_targs = ['m31', 'm33']
+#skip_targs = ['m31', 'm33']
 
 # Read the actual table
 targ_tab = QTable.read(targ_tab, format='ascii.ecsv')
@@ -277,6 +280,23 @@ for this_row in targ_tab:
             outfile_cube=gal_dir / (this_gal+'_spherex_cube_smooth.fits'),
             outfile_seds=gal_dir / (this_gal+'_spherex_seds_smooth.fits'),
             overwrite=True, verbose=True)
+
+    if do_contimage:
+    
+        print("")
+        print("Integrating continuum.")
+        print("")
+
+        integrate_continuum(
+            # Input cube
+            cont_cube = gal_dir / (this_gal+'_spherex_cube_smooth.fits'),
+            # Wavelength range
+            lam_min = 1.5*u.um,
+            lam_max = 4.5*u.um,
+            # Output file
+            outfile= gal_dir / (this_gal+'_spherex_contimage.fits'),
+            overwrite= True,
+        ) 
 
     # $&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&$&    
     # Make line images
